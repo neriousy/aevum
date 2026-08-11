@@ -7,11 +7,13 @@ export type ModelId =
 
 export type InferenceDevice = "auto" | "webgpu" | "wasm";
 export type InferenceBackend = "webgpu" | "wasm";
+export type PerformanceProfile = "automatic" | "fast" | "balanced" | "accurate" | "custom";
 
 export interface TranscriptionResult {
   text: string;
   inferenceDuration: number;
   backend: InferenceBackend;
+  detectedLanguages?: string[];
 }
 
 export interface HexSettings {
@@ -19,6 +21,7 @@ export interface HexSettings {
   pasteLastHotkey: string;
   model: ModelId;
   inferenceDevice: InferenceDevice;
+  performanceProfile: PerformanceProfile;
   language: string;
   microphoneId: string;
   doubleTapLock: boolean;
@@ -42,6 +45,7 @@ export interface Transcript {
   processingDuration?: number;
   inferenceDuration?: number;
   backend?: InferenceBackend;
+  detectedLanguages?: string[];
 }
 
 export type RecordingStatus =

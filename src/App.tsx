@@ -18,6 +18,7 @@ import { disable, enable } from "@tauri-apps/plugin-autostart";
 import { AudioCapture, playCue } from "./audio";
 import { formatDuration, formatTranscript, formatTranscriptMeta, relativeTime } from "./format";
 import {
+  detectPerformanceCapabilities,
   getPreparedModel,
   HOTKEYS,
   INFERENCE_DEVICES,
@@ -26,16 +27,21 @@ import {
   loadSettings,
   MODELS,
   PASTE_HOTKEYS,
+  PERFORMANCE_PROFILES,
+  PROFILE_MODELS,
+  recommendModel,
   saveHistory,
   saveSettings,
   resolveTranscriptionLanguage,
   setPreparedModel,
 } from "./settings";
 import { TranscriptionEngine } from "./transcription";
+import packageInfo from "../package.json";
 import type {
   HexSettings,
   InferenceBackend,
   Page,
+  PerformanceProfile,
   RecordingStatus,
   Transcript,
   WorkerProgress,
@@ -149,6 +155,24 @@ export function App() {
   useEffect(() => saveSettings(settings), [settings]);
   useEffect(() => saveHistory(history), [history]);
   useEffect(() => setConfirmClear(false), [page]);
+
+  useEffect(() => {
+    if (settings.performanceProfile !== "automatic") return;
+    let cancelled = false;
+    void detectPerformanceCapabilities().then((capabilities) => {
+      if (cancelled) return;
+      const model = recommendModel(capabilities);
+      setSettings((current) =>
+        current.performanceProfile === "automatic" &&
+        (current.model !== model || current.inferenceDevice !== "auto")
+          ? { ...current, model, inferenceDevice: "auto" }
+          : current,
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.performanceProfile]);
 
   useEffect(() => {
     if (status !== "loading" && status !== "transcribing") {
@@ -338,6 +362,7 @@ export function App() {
             processingDuration,
             inferenceDuration: result.inferenceDuration,
             backend: result.backend,
+            detectedLanguages: result.detectedLanguages,
           };
           if (settingsRef.current.saveHistory) {
             setHistory((current) => {
@@ -518,6 +543,23 @@ export function App() {
     setSettings((current) => ({ ...current, [key]: value }));
   }, []);
 
+  const updatePerformanceProfile = useCallback((profile: Exclude<PerformanceProfile, "custom">) => {
+    setSettings((current) => ({
+      ...current,
+      performanceProfile: profile,
+      inferenceDevice: "auto",
+      model: profile === "automatic" ? current.model : PROFILE_MODELS[profile],
+    }));
+  }, []);
+
+  const updateAdvancedModel = useCallback((model: HexSettings["model"]) => {
+    setSettings((current) => ({ ...current, model, performanceProfile: "custom" }));
+  }, []);
+
+  const updateAdvancedDevice = useCallback((inferenceDevice: HexSettings["inferenceDevice"]) => {
+    setSettings((current) => ({ ...current, inferenceDevice, performanceProfile: "custom" }));
+  }, []);
+
   const updateLaunchAtLogin = useCallback(
     async (value: boolean) => {
       updateSetting("launchAtLogin", value);
@@ -554,9 +596,6 @@ export function App() {
   };
 
   const currentModel = MODELS.find((model) => model.id === settings.model)!;
-  const windowsLanguage = resolveTranscriptionLanguage("auto");
-  const windowsLanguageLabel =
-    LANGUAGES.find(([value]) => value === windowsLanguage)?.[1] ?? windowsLanguage;
   const filteredHistory = history.filter((item) =>
     item.text.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
   );
@@ -818,23 +857,33 @@ export function App() {
 
         {page === "settings" && (
           <>
-            <h2>Model</h2>
+            <h2>Performance</h2>
             <p className="muted">
-              Models are downloaded once, cached on this PC, and run completely offline.
+              Automatic adapts to the PC. You can still choose a fixed speed and accuracy level.
             </p>
-            {MODELS.map((model) => (
-              <label className="choice" key={model.id}>
+            {PERFORMANCE_PROFILES.map((profile) => (
+              <label className="choice" key={profile.id}>
                 <input
                   type="radio"
-                  name="model"
-                  checked={settings.model === model.id}
-                  onChange={() => updateSetting("model", model.id)}
+                  name="performance-profile"
+                  checked={settings.performanceProfile === profile.id}
+                  onChange={() => updatePerformanceProfile(profile.id)}
                 />
                 <span>
-                  <strong>{model.name}</strong> — {model.size}. {model.description}
+                  <strong>{profile.name}</strong> — {profile.description}
                 </span>
               </label>
             ))}
+            {settings.performanceProfile === "custom" && (
+              <p className="muted">A custom model or hardware choice is active.</p>
+            )}
+            <p className="muted">
+              Selected: {currentModel.name} ({currentModel.size})
+              {modelReady && modelBackend
+                ? ` · ${modelBackend === "webgpu" ? "GPU" : "CPU"}`
+                : ""}
+              . Models are downloaded once, cached, and kept ready while Aevum is running.
+            </p>
             {!modelReady &&
               (preparing ? (
                 <p className="muted">{progressLine}</p>
@@ -844,34 +893,44 @@ export function App() {
                 </button>
               ))}
 
-            <h2>Performance</h2>
-            <p className="muted">
-              Choose which hardware runs Whisper. Changing this reloads and warms the selected model once.
-            </p>
-            {INFERENCE_DEVICES.map((device) => (
-              <label className="choice" key={device.id}>
-                <input
-                  type="radio"
-                  name="inference-device"
-                  value={device.id}
-                  checked={settings.inferenceDevice === device.id}
-                  onChange={() => updateSetting("inferenceDevice", device.id)}
-                />
-                <span>
-                  <strong>{device.name}</strong> — {device.description}
-                </span>
-              </label>
-            ))}
-            {modelReady && modelBackend && (
-              <p className="muted">
-                Active backend: {modelBackend === "webgpu" ? "GPU (WebGPU)" : "CPU (WASM)"}.
-              </p>
-            )}
+            <details className="advanced-settings">
+              <summary>Advanced model and hardware choices</summary>
+              <h3>Model</h3>
+              {MODELS.map((model) => (
+                <label className="choice" key={model.id}>
+                  <input
+                    type="radio"
+                    name="model"
+                    checked={settings.model === model.id}
+                    onChange={() => updateAdvancedModel(model.id)}
+                  />
+                  <span>
+                    <strong>{model.name}</strong> — {model.size}. {model.description}
+                  </span>
+                </label>
+              ))}
+              <h3>Hardware</h3>
+              {INFERENCE_DEVICES.map((device) => (
+                <label className="choice" key={device.id}>
+                  <input
+                    type="radio"
+                    name="inference-device"
+                    value={device.id}
+                    checked={settings.inferenceDevice === device.id}
+                    onChange={() => updateAdvancedDevice(device.id)}
+                  />
+                  <span>
+                    <strong>{device.name}</strong> — {device.description}
+                  </span>
+                </label>
+              ))}
+            </details>
 
             <h2>Language</h2>
             <p className="muted">
-              Choose the language you are speaking. An explicit choice prevents multilingual Whisper
-              from treating Polish speech as English.
+              Automatic detects each recording independently and detects again after a natural pause,
+              so Polish, English, and other supported languages can be used without changing settings.
+              Aevum always transcribes the original language; it never asks Whisper to translate it.
             </p>
             <select
               className="field"
@@ -881,7 +940,7 @@ export function App() {
             >
               {LANGUAGES.map(([value, label]) => (
                 <option key={value} value={value}>
-                  {value === "auto" ? `${label} (${windowsLanguageLabel})` : label}
+                  {label}
                 </option>
               ))}
             </select>
@@ -1065,7 +1124,7 @@ export function App() {
               shortcut. Use the tray icon to reopen it or quit completely.
             </p>
             <p>
-              Version 0.1.0. An independent Windows adaptation of{" "}
+              Version {packageInfo.version}. An independent Windows adaptation of{" "}
               <a href="https://github.com/kitlangton/Hex" target="_blank" rel="noreferrer">
                 Hex by Kit Langton
               </a>

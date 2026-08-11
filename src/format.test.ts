@@ -34,4 +34,14 @@ describe("formatTranscriptMeta", () => {
       formatTranscriptMeta({ duration: 0.6, processingDuration: 1.24, backend: "webgpu" }),
     ).toBe("0.6s audio · 1.2s processing · GPU");
   });
+
+  it("shows every automatically detected language", () => {
+    expect(
+      formatTranscriptMeta({
+        duration: 4,
+        backend: "webgpu",
+        detectedLanguages: ["pl", "en"],
+      }),
+    ).toBe("4.0s audio · GPU · Polish + English");
+  });
 });

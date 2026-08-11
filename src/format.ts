@@ -26,7 +26,10 @@ export function formatDuration(seconds: number): string {
 }
 
 export function formatTranscriptMeta(
-  transcript: Pick<Transcript, "duration" | "processingDuration" | "backend">,
+  transcript: Pick<
+    Transcript,
+    "duration" | "processingDuration" | "backend" | "detectedLanguages"
+  >,
 ) {
   const parts = [`${formatDuration(transcript.duration)} audio`];
   if (typeof transcript.processingDuration === "number") {
@@ -34,6 +37,14 @@ export function formatTranscriptMeta(
   }
   if (transcript.backend) {
     parts.push(transcript.backend === "webgpu" ? "GPU" : "CPU");
+  }
+  if (transcript.detectedLanguages?.length) {
+    const displayNames = new Intl.DisplayNames(["en"], { type: "language" });
+    parts.push(
+      transcript.detectedLanguages
+        .map((language) => displayNames.of(language) ?? language.toLocaleUpperCase())
+        .join(" + "),
+    );
   }
   return parts.join(" · ");
 }

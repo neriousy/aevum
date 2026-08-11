@@ -52,6 +52,9 @@ export class TranscriptionEngine {
           text: message.text,
           inferenceDuration: Math.max(0, Number(message.inferenceMs) || 0) / 1000,
           backend: message.backend === "webgpu" ? "webgpu" : "wasm",
+          detectedLanguages: Array.isArray(message.detectedLanguages)
+            ? message.detectedLanguages
+            : undefined,
         });
         this.requests.delete(message.id);
       } else if (message.type === "error") {

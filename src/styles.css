@@ -183,6 +183,25 @@ h2 + .muted {
   margin-bottom: 12px;
 }
 
+h3 {
+  margin: 22px 0 8px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.advanced-settings {
+  margin: 18px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+}
+
+.advanced-settings summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 600;
+}
+
 p {
   margin: 0 0 14px;
 }

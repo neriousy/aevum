@@ -1,4 +1,10 @@
-import type { HexSettings, InferenceDevice, ModelId, Transcript } from "./types";
+import type {
+  HexSettings,
+  InferenceDevice,
+  ModelId,
+  PerformanceProfile,
+  Transcript,
+} from "./types";
 
 export const MODELS: Array<{
   id: ModelId;
@@ -65,8 +71,93 @@ export const INFERENCE_DEVICES: Array<{
   },
 ];
 
+export const PERFORMANCE_PROFILES: Array<{
+  id: Exclude<PerformanceProfile, "custom">;
+  name: string;
+  description: string;
+}> = [
+  {
+    id: "automatic",
+    name: "Automatic (recommended)",
+    description:
+      "Chooses a model for this PC and uses the GPU when it is available, with a safe CPU fallback.",
+  },
+  {
+    id: "fast",
+    name: "Fast and lightweight",
+    description: "Uses Whisper Tiny for the shortest wait and lowest memory use on older PCs.",
+  },
+  {
+    id: "balanced",
+    name: "Balanced",
+    description: "Uses Whisper Base for a useful improvement in accuracy without a large slowdown.",
+  },
+  {
+    id: "accurate",
+    name: "Best accuracy",
+    description: "Uses Whisper Small. Best for modern GPUs and more difficult speech.",
+  },
+];
+
+export interface PerformanceCapabilities {
+  logicalCores: number;
+  memoryGb?: number;
+  webGpu: boolean;
+  gpuVendor?: string;
+}
+
+export const PROFILE_MODELS: Record<Exclude<PerformanceProfile, "automatic" | "custom">, ModelId> = {
+  fast: "onnx-community/whisper-tiny",
+  balanced: "onnx-community/whisper-base",
+  accurate: "onnx-community/whisper-small",
+};
+
+export function recommendModel(capabilities: PerformanceCapabilities): ModelId {
+  if (capabilities.logicalCores <= 4 || (capabilities.memoryGb ?? Infinity) <= 4) {
+    return "onnx-community/whisper-tiny";
+  }
+
+  const vendor = capabilities.gpuVendor?.toLocaleLowerCase() ?? "";
+  const likelyDiscreteGpu = /nvidia|amd|advanced micro devices/.test(vendor);
+  if (capabilities.webGpu && likelyDiscreteGpu && capabilities.logicalCores >= 8) {
+    return "onnx-community/whisper-small";
+  }
+  if (capabilities.webGpu || capabilities.logicalCores >= 8) {
+    return "onnx-community/whisper-base";
+  }
+  return "onnx-community/whisper-tiny";
+}
+
+interface PerformanceNavigatorHints {
+  deviceMemory?: number;
+  gpu?: {
+    requestAdapter(options?: {
+      powerPreference?: "high-performance";
+    }): Promise<{ info?: { vendor?: string } } | null>;
+  };
+}
+
+export async function detectPerformanceCapabilities(): Promise<PerformanceCapabilities> {
+  const browser = navigator as unknown as Navigator & PerformanceNavigatorHints;
+  let webGpu = false;
+  let gpuVendor: string | undefined;
+  try {
+    const adapter = await browser.gpu?.requestAdapter({ powerPreference: "high-performance" });
+    webGpu = Boolean(adapter);
+    gpuVendor = adapter?.info?.vendor;
+  } catch {
+    // Hardware probing is advisory. The transcription worker still performs its own safe fallback.
+  }
+  return {
+    logicalCores: Math.max(1, navigator.hardwareConcurrency || 1),
+    memoryGb: browser.deviceMemory,
+    webGpu,
+    gpuVendor,
+  };
+}
+
 export const LANGUAGES = [
-  ["auto", "Use Windows language"],
+  ["auto", "Detect automatically"],
   ["english", "English"],
   ["polish", "Polish"],
   ["german", "German"],
@@ -84,6 +175,7 @@ export const DEFAULT_SETTINGS: HexSettings = {
   pasteLastHotkey: "Ctrl+Alt+V",
   model: "onnx-community/whisper-tiny",
   inferenceDevice: "auto",
+  performanceProfile: "automatic",
   language: "auto",
   microphoneId: "default",
   doubleTapLock: true,
@@ -113,6 +205,13 @@ export function loadSettings(): HexSettings {
     if (!INFERENCE_DEVICES.some((device) => device.id === settings.inferenceDevice)) {
       settings.inferenceDevice = DEFAULT_SETTINGS.inferenceDevice;
     }
+    if (
+      !["automatic", "fast", "balanced", "accurate", "custom"].includes(
+        settings.performanceProfile,
+      )
+    ) {
+      settings.performanceProfile = DEFAULT_SETTINGS.performanceProfile;
+    }
     if (!LANGUAGES.some(([language]) => language === settings.language)) {
       settings.language = DEFAULT_SETTINGS.language;
     }
@@ -122,23 +221,8 @@ export function loadSettings(): HexSettings {
   }
 }
 
-const SYSTEM_LANGUAGE_MAP: Record<string, string> = {
-  en: "english",
-  pl: "polish",
-  de: "german",
-  es: "spanish",
-  fr: "french",
-  it: "italian",
-  pt: "portuguese",
-  uk: "ukrainian",
-  ja: "japanese",
-  zh: "chinese",
-};
-
-export function resolveTranscriptionLanguage(language: string, locale = navigator.language) {
-  if (language !== "auto") return language;
-  const localeCode = locale.toLocaleLowerCase().split(/[-_]/)[0];
-  return SYSTEM_LANGUAGE_MAP[localeCode] ?? "english";
+export function resolveTranscriptionLanguage(language: string) {
+  return language;
 }
 
 export function saveSettings(settings: HexSettings) {
