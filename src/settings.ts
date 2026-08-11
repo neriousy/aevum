@@ -18,20 +18,6 @@ export const SENSEVOICE_MODEL = {
 
 export const MODELS = [PARAKEET_MODEL, SENSEVOICE_MODEL] as const;
 
-export const HOTKEYS = [
-  "Ctrl+Shift+Space",
-  "Alt+Shift+Space",
-  "Ctrl+Alt+Space",
-  "Ctrl+Shift+H",
-];
-
-export const PASTE_HOTKEYS = [
-  "Ctrl+Alt+V",
-  "Ctrl+Shift+V",
-  "Alt+Shift+V",
-  "Disabled",
-];
-
 export const DEFAULT_SETTINGS: HexSettings = {
   hotkey: "Ctrl+Shift+Space",
   pasteLastHotkey: "Ctrl+Alt+V",
@@ -39,6 +25,7 @@ export const DEFAULT_SETTINGS: HexSettings = {
   uiLanguage: "en",
   microphoneId: "default",
   doubleTapLock: true,
+  handsFreeSilenceStop: true,
   minimumKeyTime: 0.2,
   launchAtLogin: false,
   soundEffects: true,
@@ -67,6 +54,7 @@ export function loadSettings(): HexSettings {
       uiLanguage: unverifiedUiLanguage,
       microphoneId,
       doubleTapLock,
+      handsFreeSilenceStop,
       minimumKeyTime,
       launchAtLogin,
       soundEffects,
@@ -91,6 +79,7 @@ export function loadSettings(): HexSettings {
       uiLanguage,
       microphoneId,
       doubleTapLock,
+      handsFreeSilenceStop,
       minimumKeyTime,
       launchAtLogin,
       soundEffects,

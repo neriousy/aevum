@@ -20,6 +20,7 @@ export interface HexSettings {
   uiLanguage: UiLanguage;
   microphoneId: string;
   doubleTapLock: boolean;
+  handsFreeSilenceStop: boolean;
   minimumKeyTime: number;
   launchAtLogin: boolean;
   soundEffects: boolean;

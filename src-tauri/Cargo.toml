@@ -33,7 +33,12 @@ tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 transcribe-rs = { version = "=0.3.11", features = ["onnx"] }
-windows-sys = { version = "0.61", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [profile.release]
 codegen-units = 1

@@ -31,9 +31,9 @@ export function Indicator() {
 
   const bars = useMemo(
     () =>
-      Array.from({ length: 9 }, (_, index) => {
-        const center = 1 - Math.abs(index - 4) / 5;
-        return 6 + Math.max(0.08, state.level) * center * 38;
+      Array.from({ length: 7 }, (_, index) => {
+        const center = 1 - Math.abs(index - 3) / 4;
+        return 5 + Math.max(0.08, state.level) * center * 26;
       }),
     [state.level],
   );
@@ -55,7 +55,7 @@ export function Indicator() {
           <span key={index} style={{ height }} />
         ))}
       </div>
-      <span className="indicator-label">{label}</span>
+      {state.status !== "recording" && <span className="indicator-label">{label}</span>}
     </main>
   );
 }

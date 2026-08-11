@@ -750,6 +750,237 @@ fn configure_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Default, PartialEq)]
+struct HoldCombo {
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    win: bool,
+    key: Option<u32>,
+}
+
+#[derive(Default)]
+struct HoldKeyboardState {
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    win: bool,
+    key_down: bool,
+}
+
+static HOLD_COMBO: Mutex<Option<HoldCombo>> = Mutex::new(None);
+static HOLD_KEYS: Mutex<HoldKeyboardState> = Mutex::new(HoldKeyboardState {
+    ctrl: false,
+    alt: false,
+    shift: false,
+    win: false,
+    key_down: false,
+});
+static HOLD_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static HOLD_APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+
+#[derive(Clone, Serialize)]
+struct HoldHotkeyEvent {
+    state: &'static str,
+}
+
+fn hold_vk_from_name(name: &str) -> Result<u32, String> {
+    let upper = name.trim().to_ascii_uppercase();
+    let bytes = upper.as_bytes();
+    match upper.as_str() {
+        "SPACE" => return Ok(0x20),
+        "UP" => return Ok(0x26),
+        "DOWN" => return Ok(0x28),
+        "LEFT" => return Ok(0x25),
+        "RIGHT" => return Ok(0x27),
+        "HOME" => return Ok(0x24),
+        "END" => return Ok(0x23),
+        "PAGEUP" => return Ok(0x21),
+        "PAGEDOWN" => return Ok(0x22),
+        "INSERT" => return Ok(0x2D),
+        _ => {}
+    }
+    if bytes.len() == 1 && bytes[0].is_ascii_uppercase() {
+        return Ok(bytes[0] as u32);
+    }
+    if bytes.len() == 1 && bytes[0].is_ascii_digit() {
+        return Ok(bytes[0] as u32);
+    }
+    if let Some(number) = upper.strip_prefix('F').and_then(|rest| rest.parse::<u32>().ok()) {
+        if (1..=24).contains(&number) {
+            return Ok(0x70 + number - 1);
+        }
+    }
+    Err(format!("The key \"{name}\" is not supported."))
+}
+
+fn parse_hold_shortcut(shortcut: &str) -> Result<Option<HoldCombo>, String> {
+    let trimmed = shortcut.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let mut combo = HoldCombo::default();
+    for part in trimmed.split('+') {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => combo.ctrl = true,
+            "alt" | "option" => combo.alt = true,
+            "shift" => combo.shift = true,
+            "super" | "win" | "windows" | "meta" | "cmd" | "command" => combo.win = true,
+            other => {
+                if combo.key.is_some() {
+                    return Err("A shortcut can contain only one regular key.".to_string());
+                }
+                combo.key = Some(hold_vk_from_name(other)?);
+            }
+        }
+    }
+    if !(combo.ctrl || combo.alt || combo.shift || combo.win) {
+        return Err("Include at least one modifier such as Ctrl, Alt, Shift or Win.".to_string());
+    }
+    Ok(Some(combo))
+}
+
+fn emit_hold_state(active: bool) {
+    use std::sync::atomic::Ordering;
+    if HOLD_ACTIVE.swap(active, Ordering::SeqCst) == active {
+        return;
+    }
+    if let Some(app) = HOLD_APP.get() {
+        let _ = app.emit(
+            "hold-hotkey",
+            HoldHotkeyEvent {
+                state: if active { "Pressed" } else { "Released" },
+            },
+        );
+    }
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn hold_hotkey_hook(
+    code: i32,
+    wparam: windows_sys::Win32::Foundation::WPARAM,
+    lparam: windows_sys::Win32::Foundation::LPARAM,
+) -> windows_sys::Win32::Foundation::LRESULT {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, HC_ACTION, KBDLLHOOKSTRUCT, WM_KEYDOWN, WM_SYSKEYDOWN,
+    };
+
+    let mut swallow = false;
+    if code == HC_ACTION as i32 {
+        let info = &*(lparam as *const KBDLLHOOKSTRUCT);
+        let vk = info.vkCode;
+        let down = matches!(wparam as u32, WM_KEYDOWN | WM_SYSKEYDOWN);
+        let combo = HOLD_COMBO.lock().ok().and_then(|guard| *guard);
+
+        if let Ok(mut keys) = HOLD_KEYS.lock() {
+            match vk {
+                0xA2 | 0xA3 | 0x11 => keys.ctrl = down,
+                0xA4 | 0xA5 | 0x12 => keys.alt = down,
+                0xA0 | 0xA1 | 0x10 => keys.shift = down,
+                0x5B | 0x5C => keys.win = down,
+                _ => {
+                    if let Some(combo) = combo {
+                        if combo.key == Some(vk) {
+                            keys.key_down = down;
+                        }
+                    }
+                }
+            }
+
+            if let Some(combo) = combo {
+                let modifiers_held = (!combo.ctrl || keys.ctrl)
+                    && (!combo.alt || keys.alt)
+                    && (!combo.shift || keys.shift)
+                    && (!combo.win || keys.win);
+                let satisfied = modifiers_held
+                    && match combo.key {
+                        Some(_) => keys.key_down,
+                        None => true,
+                    };
+                if combo.key == Some(vk) && modifiers_held {
+                    swallow = true;
+                }
+                drop(keys);
+                emit_hold_state(satisfied);
+            } else {
+                drop(keys);
+                emit_hold_state(false);
+            }
+        }
+    }
+    if swallow {
+        1
+    } else {
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn start_hold_hotkey_hook(app: &AppHandle) {
+    let _ = HOLD_APP.set(app.clone());
+    thread::spawn(|| unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetMessageW, SetWindowsHookExW, MSG, WH_KEYBOARD_LL,
+        };
+        let hook = SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(hold_hotkey_hook),
+            std::ptr::null_mut(),
+            0,
+        );
+        if hook.is_null() {
+            return;
+        }
+        let mut message: MSG = std::mem::zeroed();
+        while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {}
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+fn start_hold_hotkey_hook(_app: &AppHandle) {}
+
+#[tauri::command]
+fn set_hold_hotkey(shortcut: String) -> Result<(), String> {
+    let combo = parse_hold_shortcut(&shortcut)?;
+    *HOLD_COMBO
+        .lock()
+        .map_err(|_| "The shortcut state is unavailable.".to_string())? = combo;
+    emit_hold_state(false);
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("Only web links can be opened.".to_string());
+    }
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    let operation: Vec<u16> = "open\0".encode_utf16().collect();
+    let url_wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            url_wide.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+        )
+    };
+    if result as usize > 32 {
+        Ok(())
+    } else {
+        Err("Windows could not open the link.".to_string())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn open_external(_url: String) -> Result<(), String> {
+    Err("Opening links is only supported on Windows.".to_string())
+}
+
 fn position_indicator(app: &tauri::App) {
     let Some(indicator) = app.get_webview_window("indicator") else {
         return;
@@ -783,6 +1014,7 @@ pub fn run() {
         .setup(|app| {
             configure_tray(app)?;
             position_indicator(app);
+            start_hold_hotkey_hook(&app.handle().clone());
 
             if let Some(main) = app.get_webview_window("main") {
                 let window_to_hide = main.clone();
@@ -798,7 +1030,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             copy_text,
             insert_text,
+            open_external,
             prepare_transcription_model,
+            set_hold_hotkey,
             set_indicator,
             set_last_transcript,
             show_main,

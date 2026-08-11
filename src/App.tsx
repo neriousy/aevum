@@ -8,6 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   register,
@@ -23,11 +24,9 @@ import { formatDuration, formatTranscript, formatTranscriptMeta, relativeTime } 
 import { createTranslator, UI_LANGUAGES, type MessageKey } from "./i18n";
 import {
   getPreparedModels,
-  HOTKEYS,
   loadHistory,
   loadSettings,
   MODELS,
-  PASTE_HOTKEYS,
   saveHistory,
   saveSettings,
   setPreparedModel,
@@ -108,13 +107,135 @@ function RuneMark() {
 function Shortcut({ value }: { value: string }) {
   return (
     <span className="keys">
-      {value.split("+").map((part, index) => (
-        <span key={`${part}-${index}`}>
-          {index > 0 && <span className="plus">+</span>}
-          <kbd>{part}</kbd>
-        </span>
-      ))}
+      {value.split("+").map((part, index) => {
+        const display = part === "Super" ? "Win" : part === "Control" ? "Ctrl" : part;
+        return (
+          <span key={`${part}-${index}`}>
+            {index > 0 && <span className="plus">+</span>}
+            <kbd>{display}</kbd>
+          </span>
+        );
+      })}
     </span>
+  );
+}
+
+const MODIFIER_ORDER = ["Ctrl", "Alt", "Shift", "Super"] as const;
+
+function acceleratorKey(code: string): string | null {
+  if (/^Key[A-Z]$/.test(code)) return code.slice(3);
+  if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(code)) return code;
+  if (code === "Space") return "Space";
+  if (code === "ArrowUp") return "Up";
+  if (code === "ArrowDown") return "Down";
+  if (code === "ArrowLeft") return "Left";
+  if (code === "ArrowRight") return "Right";
+  if (["Home", "End", "PageUp", "PageDown", "Insert"].includes(code)) return code;
+  return null;
+}
+
+function heldModifiers(event: React.KeyboardEvent): string[] {
+  return MODIFIER_ORDER.filter(
+    (modifier) =>
+      (modifier === "Ctrl" && event.ctrlKey) ||
+      (modifier === "Alt" && event.altKey) ||
+      (modifier === "Shift" && event.shiftKey) ||
+      (modifier === "Super" && event.metaKey),
+  );
+}
+
+function ShortcutRecorder({
+  value,
+  requireKey,
+  allowDisable,
+  offLabel,
+  pressLabel,
+  hint,
+  onChange,
+  onCapturing,
+}: {
+  value: string;
+  requireKey: boolean;
+  allowDisable: boolean;
+  offLabel: string;
+  pressLabel: string;
+  hint: string;
+  onChange: (next: string) => void;
+  onCapturing: (capturing: boolean) => void;
+}) {
+  const [capturing, setCapturing] = useState(false);
+  const bestModifiers = useRef<string[]>([]);
+
+  const begin = () => {
+    bestModifiers.current = [];
+    setCapturing(true);
+    onCapturing(true);
+  };
+
+  const finish = (next?: string) => {
+    bestModifiers.current = [];
+    setCapturing(false);
+    onCapturing(false);
+    if (next !== undefined) onChange(next);
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        className={`field shortcut-field ${capturing ? "capturing" : ""}`}
+        onClick={() => {
+          if (!capturing) begin();
+        }}
+        onBlur={() => {
+          if (capturing) finish();
+        }}
+        onKeyDown={(event) => {
+          if (!capturing) {
+            if (event.key === " " || event.key === "Enter") {
+              event.preventDefault();
+              begin();
+            }
+            return;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.key === "Escape") {
+            finish();
+            return;
+          }
+          if (allowDisable && (event.key === "Backspace" || event.key === "Delete")) {
+            finish("Disabled");
+            return;
+          }
+          const modifiers = heldModifiers(event);
+          const key = acceleratorKey(event.code);
+          if (key) {
+            if (modifiers.length > 0) finish([...modifiers, key].join("+"));
+            return;
+          }
+          if (!requireKey && modifiers.length > bestModifiers.current.length) {
+            bestModifiers.current = modifiers;
+          }
+        }}
+        onKeyUp={(event) => {
+          if (!capturing || requireKey) return;
+          event.preventDefault();
+          event.stopPropagation();
+          const remaining = heldModifiers(event);
+          if (
+            bestModifiers.current.length >= 2 &&
+            remaining.length < bestModifiers.current.length
+          ) {
+            finish(bestModifiers.current.join("+"));
+          }
+        }}
+      >
+        {capturing ? pressLabel : value === "Disabled" ? offLabel : <Shortcut value={value} />}
+      </button>
+      {capturing && <p className="muted shortcut-hint">{hint}</p>}
+    </>
   );
 }
 
@@ -135,6 +256,7 @@ export function App() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
+  const [capturingShortcut, setCapturingShortcut] = useState(false);
   const [updatePhase, setUpdatePhase] = useState<UpdatePhase>("idle");
   const [updateVersion, setUpdateVersion] = useState("");
   const [updateNotes, setUpdateNotes] = useState("");
@@ -146,6 +268,7 @@ export function App() {
   if (!engine.current) engine.current = new TranscriptionEngine();
   const recordingStartedAt = useRef(0);
   const processingStartedAt = useRef(0);
+  const lastVoiceAt = useRef(0);
   const lockOnRelease = useRef(false);
   const lastShortRelease = useRef(0);
   const manualRecording = useRef(false);
@@ -432,9 +555,21 @@ export function App() {
       try {
         await audio.current.start(settingsRef.current.microphoneId, (level) => {
           setMeter(level);
+          const now = performance.now();
+          if (level > 0.05) lastVoiceAt.current = now;
+          if (
+            statusRef.current === "locked" &&
+            settingsRef.current.handsFreeSilenceStop &&
+            !finishingRef.current &&
+            now - lastVoiceAt.current > 3000
+          ) {
+            void finishRecording(true);
+            return;
+          }
           updateIndicator(statusRef.current === "locked" ? "locked" : "recording", level);
         });
         recordingStartedAt.current = performance.now();
+        lastVoiceAt.current = recordingStartedAt.current;
         statusRef.current = "recording";
         setStatus("recording");
         updateIndicator("recording", 0.12);
@@ -485,6 +620,7 @@ export function App() {
     if (lockOnRelease.current) {
       lockOnRelease.current = false;
       lastShortRelease.current = 0;
+      lastVoiceAt.current = performance.now();
       statusRef.current = "locked";
       setStatus("locked");
       updateIndicator("locked", meter);
@@ -504,14 +640,29 @@ export function App() {
 
   useEffect(() => {
     if (!isTauri()) return;
+    const unlisten = listen<{ state: string }>("hold-hotkey", (event) => {
+      if (event.payload.state === "Pressed") hotkeyPressRef.current();
+      else hotkeyReleaseRef.current();
+    });
+    return () => {
+      void unlisten.then((dispose) => dispose()).catch(() => undefined);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const shortcut = capturingShortcut ? "" : settings.hotkey;
+    void invoke("set_hold_hotkey", { shortcut }).catch((holdError) => {
+      setError(t("shortcut.failed", { hotkey: settings.hotkey, message: String(holdError) }));
+    });
+  }, [capturingShortcut, settings.hotkey, t]);
+
+  useEffect(() => {
+    if (!isTauri()) return;
     let disposed = false;
     const install = async () => {
       await unregisterAll();
-      if (disposed) return;
-      await register(settings.hotkey, (event: ShortcutEvent) => {
-        if (event.state === "Pressed") hotkeyPressRef.current();
-        if (event.state === "Released") hotkeyReleaseRef.current();
-      });
+      if (disposed || capturingShortcut) return;
       if (settings.pasteLastHotkey !== "Disabled") {
         await register(settings.pasteLastHotkey, (event: ShortcutEvent) => {
           if (event.state !== "Pressed") return;
@@ -527,13 +678,21 @@ export function App() {
       }
     };
     void install().catch((shortcutError) => {
-      setError(t("shortcut.failed", { hotkey: settings.hotkey, message: String(shortcutError) }));
+      setError(
+        t("shortcut.failed", { hotkey: settings.pasteLastHotkey, message: String(shortcutError) }),
+      );
     });
     return () => {
       disposed = true;
       void unregisterAll();
     };
-  }, [settings.hotkey, settings.pasteLastHotkey, t]);
+  }, [capturingShortcut, settings.pasteLastHotkey, t]);
+
+  const openLink = (url: string) => (event: React.MouseEvent<HTMLAnchorElement>) => {
+    if (!isTauri()) return;
+    event.preventDefault();
+    void invoke("open_external", { url }).catch(() => undefined);
+  };
 
   const requestMicrophone = useCallback(async () => {
     try {
@@ -666,7 +825,7 @@ export function App() {
 
   const statusText = recording
     ? status === "locked"
-      ? t("status.handsFree", { hotkey: settings.hotkey })
+      ? t("status.handsFree", { hotkey: settings.hotkey.replaceAll("Super", "Win") })
       : t("status.listening")
     : status === "transcribing"
       ? t("status.transcribing", { elapsed: elapsedLabel })
@@ -1010,32 +1169,32 @@ export function App() {
             <p className="muted">
               {t("settings.shortcutsInfo")}
             </p>
-            <label className="stack">
+            <div className="stack">
               {t("settings.startStop")}
-              <select
-                className="field"
+              <ShortcutRecorder
                 value={settings.hotkey}
-                onChange={(event) => updateSetting("hotkey", event.target.value)}
-              >
-                {HOTKEYS.map((hotkey) => (
-                  <option key={hotkey}>{hotkey}</option>
-                ))}
-              </select>
-            </label>
-            <label className="stack">
+                requireKey={false}
+                allowDisable={false}
+                offLabel={t("common.off")}
+                pressLabel={t("shortcut.press")}
+                hint={t("shortcut.hintHold")}
+                onChange={(next) => updateSetting("hotkey", next)}
+                onCapturing={setCapturingShortcut}
+              />
+            </div>
+            <div className="stack">
               {t("settings.pasteLast")}
-              <select
-                className="field"
+              <ShortcutRecorder
                 value={settings.pasteLastHotkey}
-                onChange={(event) => updateSetting("pasteLastHotkey", event.target.value)}
-              >
-                {PASTE_HOTKEYS.map((hotkey) => (
-                  <option key={hotkey} value={hotkey}>
-                    {hotkey === "Disabled" ? t("common.off") : hotkey}
-                  </option>
-                ))}
-              </select>
-            </label>
+                requireKey
+                allowDisable
+                offLabel={t("common.off")}
+                pressLabel={t("shortcut.press")}
+                hint={t("shortcut.hintPaste")}
+                onChange={(next) => updateSetting("pasteLastHotkey", next)}
+                onCapturing={setCapturingShortcut}
+              />
+            </div>
             <label className="choice">
               <input
                 type="checkbox"
@@ -1043,6 +1202,14 @@ export function App() {
                 onChange={(event) => updateSetting("doubleTapLock", event.target.checked)}
               />
               <span>{t("settings.doubleTap")}</span>
+            </label>
+            <label className="choice">
+              <input
+                type="checkbox"
+                checked={settings.handsFreeSilenceStop}
+                onChange={(event) => updateSetting("handsFreeSilenceStop", event.target.checked)}
+              />
+              <span>{t("settings.handsFreeSilence")}</span>
             </label>
             <label className="stack">
               {t("settings.ignoreTaps", { seconds: settings.minimumKeyTime.toFixed(1) })}
@@ -1150,11 +1317,36 @@ export function App() {
             <p>{t("about.privacy")}</p>
             <p>{t("about.tray")}</p>
             <p>
-              {t("about.versionBefore", { version: packageInfo.version })}{" "}
-              <a href="https://github.com/kitlangton/Hex" target="_blank" rel="noreferrer">
+              {t("about.version", { version: packageInfo.version })}{" "}
+              <a
+                href="https://github.com/neriousy/aevum"
+                target="_blank"
+                rel="noreferrer"
+                onClick={openLink("https://github.com/neriousy/aevum")}
+              >
+                {t("about.source")}
+              </a>
+            </p>
+            <p className="muted">
+              {t("about.creditsBefore")}{" "}
+              <a
+                href="https://github.com/cjpais/Handy"
+                target="_blank"
+                rel="noreferrer"
+                onClick={openLink("https://github.com/cjpais/Handy")}
+              >
+                Handy
+              </a>{" "}
+              {t("about.creditsAnd")}{" "}
+              <a
+                href="https://github.com/kitlangton/hex"
+                target="_blank"
+                rel="noreferrer"
+                onClick={openLink("https://github.com/kitlangton/hex")}
+              >
                 Hex by Kit Langton
               </a>
-              {t("about.versionAfter")}
+              {t("about.creditsAfter")}
             </p>
             <h2>{t("updates.title")}</h2>
             <p className="muted">{t("updates.info")}</p>
