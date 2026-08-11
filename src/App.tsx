@@ -35,7 +35,6 @@ import { TranscriptionEngine } from "./transcription";
 import packageInfo from "../package.json";
 import type {
   HexSettings,
-  InferenceBackend,
   ModelId,
   ModelProgress,
   Page,
@@ -249,10 +248,10 @@ export function App() {
   const [modelProgress, setModelProgress] = useState(0);
   const [modelReady, setModelReady] = useState(false);
   const [modelDetail, setModelDetail] = useState("");
-  const [modelBackend, setModelBackend] = useState<InferenceBackend | "">("");
   const [processingElapsed, setProcessingElapsed] = useState(0);
   const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
   const [search, setSearch] = useState("");
+  const [historyPage, setHistoryPage] = useState(0);
   const [confirmClear, setConfirmClear] = useState(false);
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
@@ -284,14 +283,17 @@ export function App() {
   const hotkeyPressRef = useRef<() => void>(() => undefined);
   const hotkeyReleaseRef = useRef<() => void>(() => undefined);
   const availableUpdateRef = useRef<Update | null>(null);
+  const updatePhaseRef = useRef<UpdatePhase>("idle");
 
   statusRef.current = status;
   settingsRef.current = settings;
   historyRef.current = history;
+  updatePhaseRef.current = updatePhase;
 
   useEffect(() => saveSettings(settings), [settings]);
   useEffect(() => saveHistory(history), [history]);
   useEffect(() => setConfirmClear(false), [page]);
+  useEffect(() => setHistoryPage(0), [search]);
 
   useEffect(
     () => () => {
@@ -411,7 +413,6 @@ export function App() {
       setModelReady(model === settingsRef.current.model);
       setModelProgress(100);
       setModelDetail("");
-      setModelBackend("native");
     };
   }, [prepareModel, t]);
 
@@ -422,7 +423,6 @@ export function App() {
       progressFiles.current.clear();
       setModelProgress(0);
       setModelDetail("");
-      setModelBackend("");
     }
     if (!ready && getPreparedModels().includes(settings.model)) void prepareModel();
   }, [prepareModel, settings.model]);
@@ -744,37 +744,61 @@ export function App() {
     notify(t("clipboard.copied"));
   };
 
-  const checkForUpdates = useCallback(async () => {
-    setUpdateError("");
-    setUpdateProgress(0);
-    if (!isTauri()) {
-      setUpdatePhase("error");
-      setUpdateError(t("updates.desktopOnly"));
-      return;
-    }
-
-    setUpdatePhase("checking");
-    try {
-      await availableUpdateRef.current?.close();
-      availableUpdateRef.current = null;
-      const update = await check({ timeout: 15_000 });
-      if (!update) {
-        setUpdateVersion("");
-        setUpdateNotes("");
-        setUpdatePhase("current");
+  const checkForUpdates = useCallback(
+    async (silent = false) => {
+      if (updatePhaseRef.current === "downloading" || updatePhaseRef.current === "restarting") {
         return;
       }
-      availableUpdateRef.current = update;
-      setUpdateVersion(update.version);
-      setUpdateNotes(update.body?.trim() ?? "");
-      setUpdatePhase("available");
-    } catch (updateCheckError) {
-      setUpdatePhase("error");
-      setUpdateError(
-        updateCheckError instanceof Error ? updateCheckError.message : String(updateCheckError),
-      );
-    }
-  }, [t]);
+      if (!silent) {
+        setUpdateError("");
+        setUpdateProgress(0);
+      }
+      if (!isTauri()) {
+        if (!silent) {
+          setUpdatePhase("error");
+          setUpdateError(t("updates.desktopOnly"));
+        }
+        return;
+      }
+
+      if (!silent) setUpdatePhase("checking");
+      try {
+        await availableUpdateRef.current?.close();
+        availableUpdateRef.current = null;
+        const update = await check({ timeout: 15_000 });
+        if (!update) {
+          setUpdateVersion("");
+          setUpdateNotes("");
+          setUpdatePhase(silent ? "idle" : "current");
+          return;
+        }
+        availableUpdateRef.current = update;
+        setUpdateVersion(update.version);
+        setUpdateNotes(update.body?.trim() ?? "");
+        setUpdatePhase("available");
+      } catch (updateCheckError) {
+        if (silent) {
+          setUpdatePhase("idle");
+          return;
+        }
+        setUpdatePhase("error");
+        setUpdateError(
+          updateCheckError instanceof Error ? updateCheckError.message : String(updateCheckError),
+        );
+      }
+    },
+    [t],
+  );
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    const initial = window.setTimeout(() => void checkForUpdates(true), 3_000);
+    const recurring = window.setInterval(() => void checkForUpdates(true), 6 * 60 * 60 * 1000);
+    return () => {
+      window.clearTimeout(initial);
+      window.clearInterval(recurring);
+    };
+  }, [checkForUpdates]);
 
   const installUpdate = useCallback(async () => {
     const update = availableUpdateRef.current;
@@ -814,13 +838,19 @@ export function App() {
   const filteredHistory = history.filter((item) =>
     item.text.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
   );
+  const HISTORY_PAGE_SIZE = 10;
+  const historyPageCount = Math.max(1, Math.ceil(filteredHistory.length / HISTORY_PAGE_SIZE));
+  const safeHistoryPage = Math.min(historyPage, historyPageCount - 1);
+  const pagedHistory = filteredHistory.slice(
+    safeHistoryPage * HISTORY_PAGE_SIZE,
+    safeHistoryPage * HISTORY_PAGE_SIZE + HISTORY_PAGE_SIZE,
+  );
   const todayCount = history.filter(
     (item) => new Date(item.createdAt).toDateString() === new Date().toDateString(),
   ).length;
   const totalMinutes = history.reduce((total, item) => total + item.duration, 0) / 60;
   const recording = status === "recording" || status === "locked";
   const preparing = !modelReady && modelProgress > 0;
-  const backendLabel = modelBackend === "native" ? t("status.nativeCpu") : "";
   const elapsedLabel = formatDuration(processingElapsed, settings.uiLanguage);
 
   const statusText = recording
@@ -833,9 +863,7 @@ export function App() {
         ? t("status.loading", { elapsed: elapsedLabel })
         : status === "inserting"
           ? t("status.inserting")
-          : modelReady
-            ? t("status.ready", { backend: backendLabel ? ` · ${backendLabel}` : "" })
-            : "";
+          : "";
 
   const statusClass = recording
     ? "status-live"
@@ -855,6 +883,23 @@ export function App() {
             <RuneMark />
             <span data-tauri-drag-region>Aevum</span>
           </div>
+          <div className="titlebar-right">
+          {(updatePhase === "available" ||
+            updatePhase === "downloading" ||
+            updatePhase === "restarting") && (
+            <button
+              type="button"
+              className="titlebar-update"
+              disabled={updatePhase !== "available"}
+              onClick={() => void installUpdate()}
+            >
+              {updatePhase === "available"
+                ? t("updates.button", { version: updateVersion })
+                : updatePhase === "downloading"
+                  ? `${Math.round(updateProgress)}%`
+                  : t("updates.restarting")}
+            </button>
+          )}
           <div className="titlebar-controls">
             <button
               type="button"
@@ -884,6 +929,7 @@ export function App() {
                 <path d="M0 0 10 10 M10 0 0 10" stroke="currentColor" strokeWidth="1.1" fill="none" />
               </svg>
             </button>
+          </div>
           </div>
         </div>
       )}
@@ -972,9 +1018,11 @@ export function App() {
                     : t("status.transcribingShort")
                   : t("home.tryHere")}
             </button>
-            {history.length > 0 && (
-              <>
-                <p className="muted">
+            <p className="muted">
+              {currentModel.name}
+              {history.length > 0 && (
+                <>
+                  {" · "}
                   {todayCount === 0
                     ? t("home.noToday")
                     : todayCount === 1
@@ -984,11 +1032,15 @@ export function App() {
                   {totalMinutes < 1
                     ? t("home.lessMinute")
                     : t("home.minutes", { count: totalMinutes.toFixed(1) })}
-                </p>
+                </>
+              )}
+            </p>
+            {history.length > 0 && (
+              <>
                 <h2>{t("home.recent")}</h2>
                 {history.slice(0, 3).map((item) => (
-                  <div className="entry" key={item.id}>
-                    <p className="entry-text">{item.text}</p>
+                  <div className="entry entry-compact" key={item.id}>
+                    <p className="entry-text entry-clamp">{item.text}</p>
                     <p className="meta">
                       {relativeTime(item.createdAt, settings.uiLanguage)} · {formatTranscriptMeta(item, settings.uiLanguage)} ·{" "}
                       <button type="button" className="link" onClick={() => void copyTranscript(item.text)}>
@@ -1028,7 +1080,7 @@ export function App() {
                 {filteredHistory.length === 0 ? (
                   <p className="muted">{t("history.noMatches")}</p>
                 ) : (
-                  filteredHistory.map((item) => (
+                  pagedHistory.map((item) => (
                     <div className="entry" key={item.id}>
                       <p className="entry-text">{item.text}</p>
                       <p className="meta">
@@ -1049,6 +1101,27 @@ export function App() {
                       </p>
                     </div>
                   ))
+                )}
+                {historyPageCount > 1 && (
+                  <p className="meta pager">
+                    <button
+                      type="button"
+                      className="link"
+                      disabled={safeHistoryPage === 0}
+                      onClick={() => setHistoryPage(safeHistoryPage - 1)}
+                    >
+                      {t("history.prev")}
+                    </button>{" "}
+                    · {t("history.page", { page: safeHistoryPage + 1, pages: historyPageCount })} ·{" "}
+                    <button
+                      type="button"
+                      className="link"
+                      disabled={safeHistoryPage === historyPageCount - 1}
+                      onClick={() => setHistoryPage(safeHistoryPage + 1)}
+                    >
+                      {t("history.next")}
+                    </button>
+                  </p>
                 )}
                 <button
                   type="button"

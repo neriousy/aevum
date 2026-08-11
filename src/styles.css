@@ -87,6 +87,34 @@ a:focus-visible {
   height: 20px;
 }
 
+.titlebar-right {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  gap: 8px;
+}
+
+.titlebar-update {
+  padding: 4px 11px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.titlebar-update:hover {
+  background: var(--accent-dark);
+}
+
+.titlebar-update:disabled {
+  background: var(--accent);
+  opacity: 0.75;
+  cursor: default;
+}
+
 .titlebar-controls {
   display: flex;
   height: 100%;
@@ -174,13 +202,14 @@ nav button.active {
 }
 
 h2 {
-  margin: 34px 0 8px;
+  margin: 26px 0 6px;
   font-size: 16px;
   font-weight: 650;
 }
 
 h2 + .muted {
-  margin-bottom: 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
 }
 
 h3 {
@@ -326,8 +355,8 @@ kbd {
 .field {
   display: block;
   width: 100%;
-  margin: 0 0 16px;
-  padding: 8px 10px;
+  margin: 0 0 12px;
+  padding: 7px 10px;
   border: 1px solid #c5c5cb;
   border-radius: 7px;
   background: #fff;
@@ -344,7 +373,7 @@ input.field::placeholder {
 
 .stack {
   display: block;
-  margin: 0 0 16px;
+  margin: 0 0 12px;
 }
 
 .shortcut-field {
@@ -377,7 +406,7 @@ input.field::placeholder {
 
 .choice {
   display: block;
-  margin: 0 0 10px;
+  margin: 0 0 7px;
   cursor: pointer;
 }
 
@@ -396,6 +425,22 @@ input.field::placeholder {
 
 .entry {
   margin: 0 0 22px;
+}
+
+.entry-compact {
+  margin: 0 0 12px;
+}
+
+.entry-clamp {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pager .link:disabled {
+  color: #c2c2c8;
+  cursor: default;
+  text-decoration: none;
 }
 
 .entry-text {

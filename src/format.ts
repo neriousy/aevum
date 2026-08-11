@@ -45,9 +45,6 @@ export function formatTranscriptMeta(
       }),
     );
   }
-  if (transcript.backend) {
-    parts.push(t("status.nativeCpu"));
-  }
   return parts.join(" · ");
 }
 
