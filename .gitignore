@@ -1,6 +1,8 @@
 node_modules/
 dist/
 src-tauri/target/
+src-tauri/onnxruntime/
+src-tauri/transcribe-libs/
 .idea/
 .vscode/
 *.log

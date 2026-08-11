@@ -1,32 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { recommendModel, resolveTranscriptionLanguage } from "./settings";
+import { DEFAULT_SETTINGS, MODELS, PARAKEET_MODEL, SENSEVOICE_MODEL } from "./settings";
 
-describe("resolveTranscriptionLanguage", () => {
-  it("keeps an explicitly selected spoken language", () => {
-    expect(resolveTranscriptionLanguage("polish")).toBe("polish");
+describe("native transcription defaults", () => {
+  it("uses Parakeet V3 by default and offers SenseVoice only as the CJK option", () => {
+    expect(PARAKEET_MODEL.id).toBe("native/parakeet-tdt-0.6b-v3");
+    expect(SENSEVOICE_MODEL.id).toBe("native/sensevoice-small-int8");
+    expect(MODELS).toHaveLength(2);
+    expect(DEFAULT_SETTINGS.model).toBe(PARAKEET_MODEL.id);
   });
 
-  it("preserves automatic language detection for every recording", () => {
-    expect(resolveTranscriptionLanguage("auto")).toBe("auto");
-  });
-});
-
-describe("recommendModel", () => {
-  it("keeps low-resource PCs on Tiny", () => {
-    expect(recommendModel({ logicalCores: 4, memoryGb: 8, webGpu: false })).toBe(
-      "onnx-community/whisper-tiny",
-    );
-  });
-
-  it("uses Small on a modern discrete GPU", () => {
-    expect(
-      recommendModel({ logicalCores: 16, memoryGb: 32, webGpu: true, gpuVendor: "NVIDIA" }),
-    ).toBe("onnx-community/whisper-small");
-  });
-
-  it("uses Base as the middle tier", () => {
-    expect(recommendModel({ logicalCores: 8, memoryGb: 16, webGpu: false })).toBe(
-      "onnx-community/whisper-base",
-    );
+  it("keeps language detection automatic while defaulting the interface to English", () => {
+    expect(DEFAULT_SETTINGS.uiLanguage).toBe("en");
+    expect(DEFAULT_SETTINGS).not.toHaveProperty("language");
+    expect(DEFAULT_SETTINGS).not.toHaveProperty("inferenceDevice");
   });
 });

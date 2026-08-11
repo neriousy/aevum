@@ -1,0 +1,3 @@
+[env]
+ORT_LIB_LOCATION = { value = "src-tauri/onnxruntime/lib", relative = true }
+ORT_PREFER_DYNAMIC_LINK = "1"

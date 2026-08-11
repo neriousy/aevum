@@ -1,4 +1,6 @@
 import type { HexSettings, Transcript } from "./types";
+import { createTranslator } from "./i18n";
+import type { UiLanguage } from "./types";
 
 const FILLER_PATTERN = /(?:^|[\s,])(?:uh+|um+|erm+|hmm+)(?:[,\s]+|(?=$|[.!?]))/gi;
 
@@ -18,44 +20,45 @@ export function formatTranscript(input: string, settings: HexSettings): string {
   return text;
 }
 
-export function formatDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+export function formatDuration(seconds: number, language: UiLanguage = "en"): string {
+  if (seconds < 60) {
+    return `${new Intl.NumberFormat(language, {
+      minimumFractionDigits: 1,
+      maximumFractionDigits: 1,
+    }).format(seconds)}s`;
+  }
   const minutes = Math.floor(seconds / 60);
   const rest = Math.round(seconds % 60);
   return `${minutes}m ${rest}s`;
 }
 
 export function formatTranscriptMeta(
-  transcript: Pick<
-    Transcript,
-    "duration" | "processingDuration" | "backend" | "detectedLanguages"
-  >,
+  transcript: Pick<Transcript, "duration" | "processingDuration" | "backend">,
+  language: UiLanguage = "en",
 ) {
-  const parts = [`${formatDuration(transcript.duration)} audio`];
+  const t = createTranslator(language);
+  const parts = [t("meta.audio", { duration: formatDuration(transcript.duration, language) })];
   if (typeof transcript.processingDuration === "number") {
-    parts.push(`${formatDuration(transcript.processingDuration)} processing`);
+    parts.push(
+      t("meta.processing", {
+        duration: formatDuration(transcript.processingDuration, language),
+      }),
+    );
   }
   if (transcript.backend) {
-    parts.push(transcript.backend === "webgpu" ? "GPU" : "CPU");
-  }
-  if (transcript.detectedLanguages?.length) {
-    const displayNames = new Intl.DisplayNames(["en"], { type: "language" });
-    parts.push(
-      transcript.detectedLanguages
-        .map((language) => displayNames.of(language) ?? language.toLocaleUpperCase())
-        .join(" + "),
-    );
+    parts.push(t("status.nativeCpu"));
   }
   return parts.join(" · ");
 }
 
-export function relativeTime(iso: string): string {
+export function relativeTime(iso: string, language: UiLanguage = "en"): string {
   const elapsed = Math.max(0, Date.now() - new Date(iso).getTime());
   const minutes = Math.floor(elapsed / 60_000);
-  if (minutes < 1) return "Just now";
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 1) return createTranslator(language)("time.justNow");
+  const relative = new Intl.RelativeTimeFormat(language, { numeric: "auto", style: "short" });
+  if (minutes < 60) return relative.format(-minutes, "minute");
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return relative.format(-hours, "hour");
   const days = Math.floor(hours / 24);
-  return days === 1 ? "Yesterday" : `${days}d ago`;
+  return relative.format(-days, "day");
 }

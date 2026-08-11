@@ -31,17 +31,13 @@ describe("formatTranscriptMeta", () => {
 
   it("separates processing time and backend from audio duration", () => {
     expect(
-      formatTranscriptMeta({ duration: 0.6, processingDuration: 1.24, backend: "webgpu" }),
-    ).toBe("0.6s audio · 1.2s processing · GPU");
+      formatTranscriptMeta({ duration: 0.6, processingDuration: 1.24, backend: "native" }),
+    ).toBe("0.6s audio · 1.2s processing · Native CPU");
   });
 
-  it("shows every automatically detected language", () => {
-    expect(
-      formatTranscriptMeta({
-        duration: 4,
-        backend: "webgpu",
-        detectedLanguages: ["pl", "en"],
-      }),
-    ).toBe("4.0s audio · GPU · Polish + English");
+  it("localizes transcript metadata", () => {
+    expect(formatTranscriptMeta({ duration: 0.6, backend: "native" }, "pl")).toBe(
+      "nagranie 0,6s · Natywny CPU",
+    );
   });
 });

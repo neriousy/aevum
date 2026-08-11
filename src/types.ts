@@ -1,28 +1,23 @@
 export type Page = "home" | "history" | "settings" | "about";
 
 export type ModelId =
-  | "onnx-community/whisper-tiny"
-  | "onnx-community/whisper-base"
-  | "onnx-community/whisper-small";
-
-export type InferenceDevice = "auto" | "webgpu" | "wasm";
-export type InferenceBackend = "webgpu" | "wasm";
-export type PerformanceProfile = "automatic" | "fast" | "balanced" | "accurate" | "custom";
+  | "native/parakeet-tdt-0.6b-v3"
+  | "native/sensevoice-small-int8";
+export type UiLanguage = "en" | "pl" | "zh-Hans";
+export type InferenceBackend = "native";
 
 export interface TranscriptionResult {
   text: string;
   inferenceDuration: number;
   backend: InferenceBackend;
-  detectedLanguages?: string[];
+  segmentCount?: number;
 }
 
 export interface HexSettings {
   hotkey: string;
   pasteLastHotkey: string;
   model: ModelId;
-  inferenceDevice: InferenceDevice;
-  performanceProfile: PerformanceProfile;
-  language: string;
+  uiLanguage: UiLanguage;
   microphoneId: string;
   doubleTapLock: boolean;
   minimumKeyTime: number;
@@ -45,7 +40,8 @@ export interface Transcript {
   processingDuration?: number;
   inferenceDuration?: number;
   backend?: InferenceBackend;
-  detectedLanguages?: string[];
+  segmentCount?: number;
+  modelId?: ModelId;
 }
 
 export type RecordingStatus =
@@ -56,7 +52,7 @@ export type RecordingStatus =
   | "transcribing"
   | "inserting";
 
-export interface WorkerProgress {
+export interface ModelProgress {
   status?: string;
   file?: string;
   progress?: number;

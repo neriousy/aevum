@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type PointerEvent as ReactPointerEvent,
@@ -15,24 +16,20 @@ import {
   type ShortcutEvent,
 } from "@tauri-apps/plugin-global-shortcut";
 import { disable, enable } from "@tauri-apps/plugin-autostart";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { AudioCapture, playCue } from "./audio";
 import { formatDuration, formatTranscript, formatTranscriptMeta, relativeTime } from "./format";
+import { createTranslator, UI_LANGUAGES, type MessageKey } from "./i18n";
 import {
-  detectPerformanceCapabilities,
-  getPreparedModel,
+  getPreparedModels,
   HOTKEYS,
-  INFERENCE_DEVICES,
-  LANGUAGES,
   loadHistory,
   loadSettings,
   MODELS,
   PASTE_HOTKEYS,
-  PERFORMANCE_PROFILES,
-  PROFILE_MODELS,
-  recommendModel,
   saveHistory,
   saveSettings,
-  resolveTranscriptionLanguage,
   setPreparedModel,
 } from "./settings";
 import { TranscriptionEngine } from "./transcription";
@@ -40,11 +37,12 @@ import packageInfo from "../package.json";
 import type {
   HexSettings,
   InferenceBackend,
+  ModelId,
+  ModelProgress,
   Page,
-  PerformanceProfile,
   RecordingStatus,
   Transcript,
-  WorkerProgress,
+  UiLanguage,
 } from "./types";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
@@ -54,12 +52,21 @@ async function invokeIfDesktop<T>(command: string, args?: Record<string, unknown
   return invoke<T>(command, args);
 }
 
-const PAGES: Array<[Page, string]> = [
-  ["home", "Home"],
-  ["history", "History"],
-  ["settings", "Settings"],
-  ["about", "About"],
+const PAGE_KEYS: Array<[Page, MessageKey]> = [
+  ["home", "nav.home"],
+  ["history", "nav.history"],
+  ["settings", "nav.settings"],
+  ["about", "nav.about"],
 ];
+
+type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "current"
+  | "available"
+  | "downloading"
+  | "restarting"
+  | "error";
 
 function RuneMark() {
   const gid = useId();
@@ -114,6 +121,7 @@ function Shortcut({ value }: { value: string }) {
 export function App() {
   const [page, setPage] = useState<Page>("home");
   const [settings, setSettings] = useState<HexSettings>(loadSettings);
+  const t = useMemo(() => createTranslator(settings.uiLanguage), [settings.uiLanguage]);
   const [history, setHistory] = useState<Transcript[]>(loadHistory);
   const [status, setStatus] = useState<RecordingStatus>("idle");
   const [meter, setMeter] = useState(0);
@@ -127,6 +135,11 @@ export function App() {
   const [confirmClear, setConfirmClear] = useState(false);
   const [toast, setToast] = useState("");
   const [error, setError] = useState("");
+  const [updatePhase, setUpdatePhase] = useState<UpdatePhase>("idle");
+  const [updateVersion, setUpdateVersion] = useState("");
+  const [updateNotes, setUpdateNotes] = useState("");
+  const [updateProgress, setUpdateProgress] = useState(0);
+  const [updateError, setUpdateError] = useState("");
 
   const audio = useRef(new AudioCapture());
   const engine = useRef<TranscriptionEngine | null>(null);
@@ -147,6 +160,7 @@ export function App() {
   const cancelRef = useRef<() => void>(() => undefined);
   const hotkeyPressRef = useRef<() => void>(() => undefined);
   const hotkeyReleaseRef = useRef<() => void>(() => undefined);
+  const availableUpdateRef = useRef<Update | null>(null);
 
   statusRef.current = status;
   settingsRef.current = settings;
@@ -156,23 +170,13 @@ export function App() {
   useEffect(() => saveHistory(history), [history]);
   useEffect(() => setConfirmClear(false), [page]);
 
-  useEffect(() => {
-    if (settings.performanceProfile !== "automatic") return;
-    let cancelled = false;
-    void detectPerformanceCapabilities().then((capabilities) => {
-      if (cancelled) return;
-      const model = recommendModel(capabilities);
-      setSettings((current) =>
-        current.performanceProfile === "automatic" &&
-        (current.model !== model || current.inferenceDevice !== "auto")
-          ? { ...current, model, inferenceDevice: "auto" }
-          : current,
-      );
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [settings.performanceProfile]);
+  useEffect(
+    () => () => {
+      void availableUpdateRef.current?.close();
+      availableUpdateRef.current = null;
+    },
+    [],
+  );
 
   useEffect(() => {
     if (status !== "loading" && status !== "transcribing") {
@@ -194,9 +198,21 @@ export function App() {
   }, []);
 
   const updateIndicator = useCallback(
-    (nextStatus: string, level = 0, message?: string) =>
-      void invokeIfDesktop("set_indicator", { status: nextStatus, level, message }),
-    [],
+    (nextStatus: string, level = 0, message?: string) => {
+      const labels: Record<string, MessageKey> = {
+        recording: "indicator.listening",
+        locked: "indicator.handsFree",
+        transcribing: "indicator.transcribing",
+        loading: "indicator.loading",
+        inserting: "indicator.inserting",
+      };
+      void invokeIfDesktop("set_indicator", {
+        status: nextStatus,
+        level,
+        message: message ?? (labels[nextStatus] ? t(labels[nextStatus]) : undefined),
+      });
+    },
+    [t],
   );
 
   const refreshMicrophones = useCallback(async () => {
@@ -214,25 +230,23 @@ export function App() {
   const prepareModel = useCallback(async () => {
     setError("");
     setModelReady(false);
-    setModelDetail("Preparing the model");
+    const currentModel = MODELS.find((model) => model.id === settingsRef.current.model)!;
+    setModelDetail(t("model.preparing", { model: currentModel.name }));
     progressFiles.current.clear();
     setModelProgress((value) => Math.max(2, value));
     try {
-      await engine.current!.prepare(
-        settingsRef.current.model,
-        settingsRef.current.inferenceDevice,
-      );
+      await engine.current!.prepare(settingsRef.current.model);
     } catch (prepareError) {
       const message = prepareError instanceof Error ? prepareError.message : String(prepareError);
       setModelProgress(0);
       setModelDetail("");
-      setError(`The model download failed: ${message}`);
+      setError(t("model.downloadFailed", { message }));
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     const currentEngine = engine.current!;
-    currentEngine.onProgress = (progress: WorkerProgress) => {
+    currentEngine.onProgress = (progress: ModelProgress) => {
       const file = progress.file;
       if (file) {
         if (progress.status === "progress" && Number(progress.total) > 0) {
@@ -254,28 +268,28 @@ export function App() {
       }
       const fileName = file?.split("/").at(-1);
       setModelDetail(
-        progress.status === "done"
-          ? "Getting the model ready for this PC"
+        progress.status === "extracting"
+          ? t("model.installing")
+          : progress.status === "verifying"
+            ? t("model.verifying")
+            : progress.status === "loading" || progress.status === "done" || progress.status === "ready"
+              ? t("model.readying")
           : fileName
-            ? `Downloading ${fileName}`
-            : "Preparing the model",
+            ? t("model.downloadingFile", { file: fileName })
+            : t("model.preparing", { model: currentModel.name }),
       );
     };
-    currentEngine.onReady = (model, device, backend) => {
+    currentEngine.onReady = (model) => {
       setPreparedModel(model);
-      const isCurrent =
-        model === settingsRef.current.model && device === settingsRef.current.inferenceDevice;
-      setModelReady(isCurrent);
-      setModelProgress(isCurrent ? 100 : 0);
+      setModelReady(model === settingsRef.current.model);
+      setModelProgress(100);
       setModelDetail("");
-      if (isCurrent) setModelBackend(backend);
+      setModelBackend("native");
     };
-
-    if (getPreparedModel() === settings.model) void prepareModel();
-  }, [prepareModel, settings.inferenceDevice, settings.model]);
+  }, [prepareModel, t]);
 
   useEffect(() => {
-    const ready = engine.current!.isReady(settings.model, settings.inferenceDevice);
+    const ready = engine.current!.isReady(settings.model);
     setModelReady(ready);
     if (!ready) {
       progressFiles.current.clear();
@@ -283,7 +297,8 @@ export function App() {
       setModelDetail("");
       setModelBackend("");
     }
-  }, [settings.inferenceDevice, settings.model]);
+    if (!ready && getPreparedModels().includes(settings.model)) void prepareModel();
+  }, [prepareModel, settings.model]);
 
   const stopEscapeShortcut = useCallback(() => {
     if (isTauri()) void unregister("Escape").catch(() => undefined);
@@ -304,8 +319,8 @@ export function App() {
     updateIndicator("hidden");
     stopEscapeShortcut();
     if (settingsRef.current.soundEffects) playCue("cancel");
-    notify("Recording cancelled");
-  }, [notify, stopEscapeShortcut, updateIndicator]);
+    notify(t("recording.cancelled"));
+  }, [notify, stopEscapeShortcut, t, updateIndicator]);
   cancelRef.current = () => void cancelRecording();
 
   const finishRecording = useCallback(
@@ -328,10 +343,7 @@ export function App() {
 
         if (settingsRef.current.soundEffects) playCue("stop");
 
-        const nextStatus = engine.current!.isReady(
-          settingsRef.current.model,
-          settingsRef.current.inferenceDevice,
-        )
+        const nextStatus = engine.current!.isReady(settingsRef.current.model)
           ? "transcribing"
           : "loading";
         processingStartedAt.current = performance.now();
@@ -341,14 +353,9 @@ export function App() {
         updateIndicator(nextStatus);
 
         try {
-          const result = await engine.current!.transcribe(
-            samples,
-            settingsRef.current.model,
-            resolveTranscriptionLanguage(settingsRef.current.language),
-            settingsRef.current.inferenceDevice,
-          );
+          const result = await engine.current!.transcribe(samples, settingsRef.current.model);
           const text = formatTranscript(result.text, settingsRef.current);
-          if (!text) throw new Error("No speech was detected. Try speaking a little closer to the microphone.");
+          if (!text) throw new Error(t("recording.noSpeech"));
 
           const processingDuration = Math.max(
             0,
@@ -362,7 +369,8 @@ export function App() {
             processingDuration,
             inferenceDuration: result.inferenceDuration,
             backend: result.backend,
-            detectedLanguages: result.detectedLanguages,
+            segmentCount: result.segmentCount,
+            modelId: settingsRef.current.model,
           };
           if (settingsRef.current.saveHistory) {
             setHistory((current) => {
@@ -393,12 +401,7 @@ export function App() {
           const message =
             transcriptionError instanceof Error ? transcriptionError.message : String(transcriptionError);
           setError(message);
-          if (
-            !engine.current!.isReady(
-              settingsRef.current.model,
-              settingsRef.current.inferenceDevice,
-            )
-          ) {
+          if (!engine.current!.isReady(settingsRef.current.model)) {
             progressFiles.current.clear();
             setModelProgress(0);
             setModelDetail("");
@@ -412,7 +415,7 @@ export function App() {
         finishingRef.current = false;
       }
     },
-    [notify, stopEscapeShortcut, updateIndicator],
+    [notify, stopEscapeShortcut, t, updateIndicator],
   );
 
   const startRecording = useCallback(
@@ -445,7 +448,7 @@ export function App() {
         }
       } catch (recordingError) {
         const message = recordingError instanceof Error ? recordingError.message : String(recordingError);
-        setError(`Microphone unavailable: ${message}`);
+        setError(t("recording.microphoneUnavailable", { message }));
         statusRef.current = "idle";
         setStatus("idle");
         void invokeIfDesktop("show_main");
@@ -453,7 +456,7 @@ export function App() {
         startingRef.current = false;
       }
     },
-    [finishRecording, updateIndicator],
+    [finishRecording, t, updateIndicator],
   );
 
   const handleHotkeyPress = useCallback(() => {
@@ -520,44 +523,27 @@ export function App() {
       }
     };
     void install().catch((shortcutError) => {
-      setError(`Could not register ${settings.hotkey}: ${String(shortcutError)}`);
+      setError(t("shortcut.failed", { hotkey: settings.hotkey, message: String(shortcutError) }));
     });
     return () => {
       disposed = true;
       void unregisterAll();
     };
-  }, [settings.hotkey, settings.pasteLastHotkey]);
+  }, [settings.hotkey, settings.pasteLastHotkey, t]);
 
   const requestMicrophone = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       stream.getTracks().forEach((track) => track.stop());
       await refreshMicrophones();
-      notify("Microphone is ready");
+      notify(t("recording.microphoneReady"));
     } catch (permissionError) {
-      setError(`Microphone permission was not granted: ${String(permissionError)}`);
+      setError(t("recording.permissionDenied", { message: String(permissionError) }));
     }
-  }, [notify, refreshMicrophones]);
+  }, [notify, refreshMicrophones, t]);
 
   const updateSetting = useCallback(<K extends keyof HexSettings>(key: K, value: HexSettings[K]) => {
     setSettings((current) => ({ ...current, [key]: value }));
-  }, []);
-
-  const updatePerformanceProfile = useCallback((profile: Exclude<PerformanceProfile, "custom">) => {
-    setSettings((current) => ({
-      ...current,
-      performanceProfile: profile,
-      inferenceDevice: "auto",
-      model: profile === "automatic" ? current.model : PROFILE_MODELS[profile],
-    }));
-  }, []);
-
-  const updateAdvancedModel = useCallback((model: HexSettings["model"]) => {
-    setSettings((current) => ({ ...current, model, performanceProfile: "custom" }));
-  }, []);
-
-  const updateAdvancedDevice = useCallback((inferenceDevice: HexSettings["inferenceDevice"]) => {
-    setSettings((current) => ({ ...current, inferenceDevice, performanceProfile: "custom" }));
   }, []);
 
   const updateLaunchAtLogin = useCallback(
@@ -569,10 +555,10 @@ export function App() {
         else await disable();
       } catch (autostartError) {
         updateSetting("launchAtLogin", !value);
-        setError(`Could not update startup behavior: ${String(autostartError)}`);
+        setError(t("startup.failed", { message: String(autostartError) }));
       }
     },
-    [updateSetting],
+    [t, updateSetting],
   );
 
   const onRecordPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -592,10 +578,76 @@ export function App() {
   const copyTranscript = async (text: string) => {
     await invokeIfDesktop("copy_text", { text });
     if (!isTauri()) await navigator.clipboard?.writeText(text);
-    notify("Copied to clipboard");
+    notify(t("clipboard.copied"));
   };
 
-  const currentModel = MODELS.find((model) => model.id === settings.model)!;
+  const checkForUpdates = useCallback(async () => {
+    setUpdateError("");
+    setUpdateProgress(0);
+    if (!isTauri()) {
+      setUpdatePhase("error");
+      setUpdateError(t("updates.desktopOnly"));
+      return;
+    }
+
+    setUpdatePhase("checking");
+    try {
+      await availableUpdateRef.current?.close();
+      availableUpdateRef.current = null;
+      const update = await check({ timeout: 15_000 });
+      if (!update) {
+        setUpdateVersion("");
+        setUpdateNotes("");
+        setUpdatePhase("current");
+        return;
+      }
+      availableUpdateRef.current = update;
+      setUpdateVersion(update.version);
+      setUpdateNotes(update.body?.trim() ?? "");
+      setUpdatePhase("available");
+    } catch (updateCheckError) {
+      setUpdatePhase("error");
+      setUpdateError(
+        updateCheckError instanceof Error ? updateCheckError.message : String(updateCheckError),
+      );
+    }
+  }, [t]);
+
+  const installUpdate = useCallback(async () => {
+    const update = availableUpdateRef.current;
+    if (!update) return;
+    setUpdateError("");
+    setUpdateProgress(0);
+    setUpdatePhase("downloading");
+    let downloaded = 0;
+    let total = 0;
+    try {
+      await update.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          total = event.data.contentLength ?? 0;
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          setUpdateProgress(total > 0 ? Math.min(100, (downloaded / total) * 100) : 0);
+        } else if (event.event === "Finished") {
+          setUpdateProgress(100);
+        }
+      });
+      setUpdatePhase("restarting");
+      await relaunch();
+    } catch (updateInstallError) {
+      setUpdatePhase("error");
+      setUpdateError(
+        updateInstallError instanceof Error
+          ? updateInstallError.message
+          : String(updateInstallError),
+      );
+    }
+  }, []);
+
+  const currentModel = MODELS.find((model) => model.id === settings.model) ?? MODELS[0];
+  const currentModelDescription = t(
+    currentModel.id === MODELS[0].id ? "model.parakeetDescription" : "model.senseDescription",
+  );
   const filteredHistory = history.filter((item) =>
     item.text.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
   );
@@ -605,22 +657,21 @@ export function App() {
   const totalMinutes = history.reduce((total, item) => total + item.duration, 0) / 60;
   const recording = status === "recording" || status === "locked";
   const preparing = !modelReady && modelProgress > 0;
-  const backendLabel =
-    modelBackend === "webgpu" ? "GPU accelerated" : modelBackend === "wasm" ? "CPU mode" : "";
-  const elapsedLabel = formatDuration(processingElapsed);
+  const backendLabel = modelBackend === "native" ? t("status.nativeCpu") : "";
+  const elapsedLabel = formatDuration(processingElapsed, settings.uiLanguage);
 
   const statusText = recording
     ? status === "locked"
-      ? `Listening hands-free. Press ${settings.hotkey} to finish.`
-      : "Listening. Release the shortcut to insert your words."
+      ? t("status.handsFree", { hotkey: settings.hotkey })
+      : t("status.listening")
     : status === "transcribing"
-      ? `Transcribing${modelBackend === "webgpu" ? " on GPU" : ""}… ${elapsedLabel}`
+      ? t("status.transcribing", { elapsed: elapsedLabel })
       : status === "loading"
-        ? `Loading and warming the model… ${elapsedLabel}`
+        ? t("status.loading", { elapsed: elapsedLabel })
         : status === "inserting"
-          ? "Inserting text…"
+          ? t("status.inserting")
           : modelReady
-            ? `Ready to transcribe${backendLabel ? ` · ${backendLabel}` : ""}.`
+            ? t("status.ready", { backend: backendLabel ? ` · ${backendLabel}` : "" })
             : "";
 
   const statusClass = recording
@@ -629,7 +680,9 @@ export function App() {
       ? "status-busy"
       : "status-ready";
 
-  const progressLine = `${modelDetail || "Preparing the model"} — ${Math.round(modelProgress)}%`;
+  const progressLine = `${
+    modelDetail || t("model.preparing", { model: currentModel.name })
+  } — ${Math.round(modelProgress)}%`;
 
   return (
     <div className="app">
@@ -642,7 +695,7 @@ export function App() {
           <div className="titlebar-controls">
             <button
               type="button"
-              aria-label="Minimize"
+              aria-label={t("window.minimize")}
               onClick={() => void getCurrentWindow().minimize()}
             >
               <svg viewBox="0 0 10 10" aria-hidden="true">
@@ -651,7 +704,7 @@ export function App() {
             </button>
             <button
               type="button"
-              aria-label="Maximize"
+              aria-label={t("window.maximize")}
               onClick={() => void getCurrentWindow().toggleMaximize()}
             >
               <svg viewBox="0 0 10 10" aria-hidden="true">
@@ -661,7 +714,7 @@ export function App() {
             <button
               type="button"
               className="titlebar-close"
-              aria-label="Close"
+              aria-label={t("window.close")}
               onClick={() => void getCurrentWindow().close()}
             >
               <svg viewBox="0 0 10 10" aria-hidden="true">
@@ -678,16 +731,16 @@ export function App() {
             <RuneMark />
             Aevum
           </h1>
-          <p className="tagline">Voice typing that runs entirely on your PC.</p>
+          <p className="tagline">{t("tagline")}</p>
           <nav>
-            {PAGES.map(([id, label]) => (
+            {PAGE_KEYS.map(([id, label]) => (
               <button
                 type="button"
                 key={id}
                 className={page === id ? "active" : ""}
                 onClick={() => setPage(id)}
               >
-                {label}
+                {t(label)}
               </button>
             ))}
           </nav>
@@ -697,7 +750,7 @@ export function App() {
           <p className="error">
             {error}{" "}
             <button type="button" className="link" onClick={() => setError("")}>
-              Dismiss
+              {t("common.dismiss")}
             </button>
           </p>
         )}
@@ -711,10 +764,8 @@ export function App() {
               </p>
             )}
             <p>
-              Hold <Shortcut value={settings.hotkey} /> in any app and start talking. When you
-              release, Aevum types what you said wherever your cursor is — emails, documents, chats,
-              code. Press <kbd>Esc</kbd> while recording to cancel, or double-tap the shortcut to
-              keep recording hands-free.
+              {t("home.instructionsBefore")} <Shortcut value={settings.hotkey} />{" "}
+              {t("home.instructionsAfter")} <kbd>Esc</kbd> {t("home.instructionsEnd")}
             </p>
             {!modelReady &&
               (preparing ? (
@@ -722,12 +773,13 @@ export function App() {
               ) : (
                 <>
                   <p>
-                    Before the first transcription, Aevum downloads the {currentModel.name} model
-                    ({currentModel.size}) once and keeps it on this PC. Transcription runs
-                    completely offline — no audio ever leaves your machine.
+                    {t("home.firstDownload", {
+                      model: currentModel.name,
+                      size: currentModel.size,
+                    })}
                   </p>
                   <button type="button" className="button primary" onClick={() => void prepareModel()}>
-                    Download the {currentModel.name} model
+                    {t("home.downloadModel", { model: currentModel.name })}
                   </button>
                 </>
               ))}
@@ -750,40 +802,40 @@ export function App() {
               }}
             >
               {recording
-                ? "Listening — release to finish"
+                ? t("home.listenRelease")
                 : status === "transcribing" || status === "loading" || status === "inserting"
                   ? status === "inserting"
-                    ? "Inserting text…"
-                    : "Transcribing…"
-                  : "Hold to try it here"}
+                    ? t("status.inserting")
+                    : t("status.transcribingShort")
+                  : t("home.tryHere")}
             </button>
             {history.length > 0 && (
               <>
                 <p className="muted">
                   {todayCount === 0
-                    ? "No transcriptions yet today"
+                    ? t("home.noToday")
                     : todayCount === 1
-                      ? "One transcription today"
-                      : `${todayCount} transcriptions today`}
+                      ? t("home.oneToday")
+                      : t("home.manyToday", { count: todayCount })}
                   {" · "}
                   {totalMinutes < 1
-                    ? "less than a minute of speech captured in total."
-                    : `${totalMinutes.toFixed(1)} minutes of speech captured in total.`}
+                    ? t("home.lessMinute")
+                    : t("home.minutes", { count: totalMinutes.toFixed(1) })}
                 </p>
-                <h2>Recent</h2>
+                <h2>{t("home.recent")}</h2>
                 {history.slice(0, 3).map((item) => (
                   <div className="entry" key={item.id}>
                     <p className="entry-text">{item.text}</p>
                     <p className="meta">
-                      {relativeTime(item.createdAt)} · {formatTranscriptMeta(item)} ·{" "}
+                      {relativeTime(item.createdAt, settings.uiLanguage)} · {formatTranscriptMeta(item, settings.uiLanguage)} ·{" "}
                       <button type="button" className="link" onClick={() => void copyTranscript(item.text)}>
-                        Copy
+                        {t("common.copy")}
                       </button>
                     </p>
                   </div>
                 ))}
                 <button type="button" className="link" onClick={() => setPage("history")}>
-                  See all history
+                  {t("home.seeHistory")}
                 </button>
               </>
             )}
@@ -794,32 +846,32 @@ export function App() {
           <>
             {history.length === 0 ? (
               <p className="muted">
-                Nothing here yet. Transcripts appear here after your first dictation, saved only on
-                this PC.
+                {t("history.empty")}
               </p>
             ) : (
               <>
                 <p className="muted">
-                  {history.length === 1 ? "One transcript" : `${history.length} transcripts`}, stored
-                  only on this PC.
+                  {history.length === 1
+                    ? t("history.one")
+                    : t("history.many", { count: history.length })}
                 </p>
                 <input
                   className="field"
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search transcripts"
-                  aria-label="Search transcripts"
+                  placeholder={t("history.search")}
+                  aria-label={t("history.search")}
                 />
                 {filteredHistory.length === 0 ? (
-                  <p className="muted">No transcripts match your search.</p>
+                  <p className="muted">{t("history.noMatches")}</p>
                 ) : (
                   filteredHistory.map((item) => (
                     <div className="entry" key={item.id}>
                       <p className="entry-text">{item.text}</p>
                       <p className="meta">
-                        {relativeTime(item.createdAt)} · {formatTranscriptMeta(item)} ·{" "}
+                        {relativeTime(item.createdAt, settings.uiLanguage)} · {formatTranscriptMeta(item, settings.uiLanguage)} ·{" "}
                         <button type="button" className="link" onClick={() => void copyTranscript(item.text)}>
-                          Copy
+                          {t("common.copy")}
                         </button>{" "}
                         ·{" "}
                         <button
@@ -829,7 +881,7 @@ export function App() {
                             setHistory((current) => current.filter((entry) => entry.id !== item.id))
                           }
                         >
-                          Delete
+                          {t("common.delete")}
                         </button>
                       </p>
                     </div>
@@ -848,7 +900,7 @@ export function App() {
                     setConfirmClear(false);
                   }}
                 >
-                  {confirmClear ? "Click again to delete everything" : "Clear history"}
+                  {confirmClear ? t("history.clearConfirm") : t("history.clear")}
                 </button>
               </>
             )}
@@ -857,125 +909,104 @@ export function App() {
 
         {page === "settings" && (
           <>
-            <h2>Performance</h2>
-            <p className="muted">
-              Automatic adapts to the PC. You can still choose a fixed speed and accuracy level.
+            <h2>{t("settings.interface")}</h2>
+            <label className="stack">
+              {t("settings.appLanguage")}
+              <select
+                className="field"
+                value={settings.uiLanguage}
+                onChange={(event) =>
+                  updateSetting("uiLanguage", event.target.value as UiLanguage)
+                }
+              >
+                {UI_LANGUAGES.map((language) => (
+                  <option key={language.id} value={language.id}>
+                    {t(language.labelKey)}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <h2>{t("settings.model")}</h2>
+            <label className="stack">
+              {t("settings.modelLabel")}
+              <select
+                className="field"
+                value={settings.model}
+                onChange={(event) => updateSetting("model", event.target.value as ModelId)}
+              >
+                {MODELS.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name}
+                    {model.id === MODELS[0].id
+                      ? ` — ${t("settings.recommended")}`
+                      : ` — ${t("settings.optionalCjk")}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <p>
+              <strong>{currentModel.name}</strong> — {currentModel.size}. {currentModelDescription}
             </p>
-            {PERFORMANCE_PROFILES.map((profile) => (
-              <label className="choice" key={profile.id}>
-                <input
-                  type="radio"
-                  name="performance-profile"
-                  checked={settings.performanceProfile === profile.id}
-                  onChange={() => updatePerformanceProfile(profile.id)}
-                />
-                <span>
-                  <strong>{profile.name}</strong> — {profile.description}
-                </span>
-              </label>
-            ))}
-            {settings.performanceProfile === "custom" && (
-              <p className="muted">A custom model or hardware choice is active.</p>
-            )}
             <p className="muted">
-              Selected: {currentModel.name} ({currentModel.size})
-              {modelReady && modelBackend
-                ? ` · ${modelBackend === "webgpu" ? "GPU" : "CPU"}`
-                : ""}
-              . Models are downloaded once, cached, and kept ready while Aevum is running.
+              {t("settings.modelInfo")}
             </p>
             {!modelReady &&
               (preparing ? (
                 <p className="muted">{progressLine}</p>
               ) : (
                 <button type="button" className="button primary" onClick={() => void prepareModel()}>
-                  Download the {currentModel.name} model
+                  {t("home.downloadModel", { model: currentModel.name })}
                 </button>
               ))}
 
-            <details className="advanced-settings">
-              <summary>Advanced model and hardware choices</summary>
-              <h3>Model</h3>
-              {MODELS.map((model) => (
-                <label className="choice" key={model.id}>
-                  <input
-                    type="radio"
-                    name="model"
-                    checked={settings.model === model.id}
-                    onChange={() => updateAdvancedModel(model.id)}
-                  />
-                  <span>
-                    <strong>{model.name}</strong> — {model.size}. {model.description}
-                  </span>
-                </label>
-              ))}
-              <h3>Hardware</h3>
-              {INFERENCE_DEVICES.map((device) => (
-                <label className="choice" key={device.id}>
-                  <input
-                    type="radio"
-                    name="inference-device"
-                    value={device.id}
-                    checked={settings.inferenceDevice === device.id}
-                    onChange={() => updateAdvancedDevice(device.id)}
-                  />
-                  <span>
-                    <strong>{device.name}</strong> — {device.description}
-                  </span>
-                </label>
-              ))}
-            </details>
+            <h2>{t("settings.languages")}</h2>
+            {settings.model === MODELS[0].id ? (
+              <>
+                <p className="muted">
+                  {t("settings.parakeetLanguages")}
+                </p>
+                <p className="muted">
+                  {t("settings.parakeetSupported")}
+                </p>
+              </>
+            ) : (
+              <p className="muted">
+                {t("settings.senseLanguages")}
+              </p>
+            )}
 
-            <h2>Language</h2>
-            <p className="muted">
-              Automatic detects each recording independently and detects again after a natural pause,
-              so Polish, English, and other supported languages can be used without changing settings.
-              Aevum always transcribes the original language; it never asks Whisper to translate it.
-            </p>
+            <h2>{t("settings.microphone")}</h2>
             <select
               className="field"
-              aria-label="Spoken language"
-              value={settings.language}
-              onChange={(event) => updateSetting("language", event.target.value)}
-            >
-              {LANGUAGES.map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-
-            <h2>Microphone</h2>
-            <select
-              className="field"
-              aria-label="Microphone"
+              aria-label={t("settings.microphone")}
               value={settings.microphoneId}
               onChange={(event) => updateSetting("microphoneId", event.target.value)}
             >
-              <option value="default">System default</option>
+              <option value="default">{t("settings.systemDefault")}</option>
               {microphones
                 .filter((device) => device.deviceId !== "default")
                 .map((device, index) => (
                   <option key={device.deviceId} value={device.deviceId}>
-                    {device.label || `Microphone ${index + 1}`}
+                    {device.label || t("settings.microphoneNumber", { number: index + 1 })}
                   </option>
                 ))}
             </select>
             {microphones.every((device) => !device.label) && (
               <p className="muted">
                 <button type="button" className="link" onClick={() => void requestMicrophone()}>
-                  Allow microphone access
+                  {t("settings.allowMicrophone")}
                 </button>{" "}
-                to see your devices by name.
+                {t("settings.devicesByName")}
               </p>
             )}
 
-            <h2>Shortcuts</h2>
+            <h2>{t("settings.shortcuts")}</h2>
             <p className="muted">
-              The record shortcut works globally, even while Aevum sits hidden in the tray.
+              {t("settings.shortcutsInfo")}
             </p>
             <label className="stack">
-              Start and stop recording
+              {t("settings.startStop")}
               <select
                 className="field"
                 value={settings.hotkey}
@@ -987,7 +1018,7 @@ export function App() {
               </select>
             </label>
             <label className="stack">
-              Paste the last transcript
+              {t("settings.pasteLast")}
               <select
                 className="field"
                 value={settings.pasteLastHotkey}
@@ -995,7 +1026,7 @@ export function App() {
               >
                 {PASTE_HOTKEYS.map((hotkey) => (
                   <option key={hotkey} value={hotkey}>
-                    {hotkey === "Disabled" ? "Off" : hotkey}
+                    {hotkey === "Disabled" ? t("common.off") : hotkey}
                   </option>
                 ))}
               </select>
@@ -1006,10 +1037,10 @@ export function App() {
                 checked={settings.doubleTapLock}
                 onChange={(event) => updateSetting("doubleTapLock", event.target.checked)}
               />
-              <span>Double-tap the shortcut to keep recording until you press it again</span>
+              <span>{t("settings.doubleTap")}</span>
             </label>
             <label className="stack">
-              Ignore taps shorter than {settings.minimumKeyTime.toFixed(1)} seconds
+              {t("settings.ignoreTaps", { seconds: settings.minimumKeyTime.toFixed(1) })}
               <input
                 className="range"
                 type="range"
@@ -1021,15 +1052,15 @@ export function App() {
               />
             </label>
 
-            <h2>Output</h2>
-            <p className="muted">How the transcribed text reaches your apps, and how it is cleaned up.</p>
+            <h2>{t("settings.output")}</h2>
+            <p className="muted">{t("settings.outputInfo")}</p>
             <label className="choice">
               <input
                 type="checkbox"
                 checked={settings.pasteWithClipboard}
                 onChange={(event) => updateSetting("pasteWithClipboard", event.target.checked)}
               />
-              <span>Insert text through the clipboard, which works in most apps</span>
+              <span>{t("settings.clipboardInsert")}</span>
             </label>
             <label className="choice">
               <input
@@ -1037,7 +1068,7 @@ export function App() {
                 checked={settings.copyToClipboard}
                 onChange={(event) => updateSetting("copyToClipboard", event.target.checked)}
               />
-              <span>Keep each transcript on the clipboard so you can paste it again</span>
+              <span>{t("settings.keepClipboard")}</span>
             </label>
             <label className="choice">
               <input
@@ -1045,7 +1076,7 @@ export function App() {
                 checked={settings.removeFillers}
                 onChange={(event) => updateSetting("removeFillers", event.target.checked)}
               />
-              <span>Remove filler words like “um” and “uh”</span>
+              <span>{t("settings.removeFillers")}</span>
             </label>
             <label className="choice">
               <input
@@ -1053,7 +1084,7 @@ export function App() {
                 checked={settings.lowercase}
                 onChange={(event) => updateSetting("lowercase", event.target.checked)}
               />
-              <span>Make everything lowercase</span>
+              <span>{t("settings.lowercase")}</span>
             </label>
             <label className="choice">
               <input
@@ -1061,17 +1092,17 @@ export function App() {
                 checked={settings.removePunctuation}
                 onChange={(event) => updateSetting("removePunctuation", event.target.checked)}
               />
-              <span>Remove punctuation, which is handy for terminals and search boxes</span>
+              <span>{t("settings.removePunctuation")}</span>
             </label>
 
-            <h2>General</h2>
+            <h2>{t("settings.general")}</h2>
             <label className="choice">
               <input
                 type="checkbox"
                 checked={settings.launchAtLogin}
                 onChange={(event) => void updateLaunchAtLogin(event.target.checked)}
               />
-              <span>Start Aevum when you sign in to Windows</span>
+              <span>{t("settings.launchAtLogin")}</span>
             </label>
             <label className="choice">
               <input
@@ -1079,7 +1110,7 @@ export function App() {
                 checked={settings.soundEffects}
                 onChange={(event) => updateSetting("soundEffects", event.target.checked)}
               />
-              <span>Play a sound when recording starts and stops</span>
+              <span>{t("settings.sounds")}</span>
             </label>
             <label className="choice">
               <input
@@ -1087,11 +1118,11 @@ export function App() {
                 checked={settings.saveHistory}
                 onChange={(event) => updateSetting("saveHistory", event.target.checked)}
               />
-              <span>Save transcripts to history on this PC</span>
+              <span>{t("settings.saveHistory")}</span>
             </label>
             {settings.saveHistory && (
               <label className="stack">
-                Number of transcripts to keep
+                {t("settings.historyLimit")}
                 <select
                   className="field"
                   value={settings.maxHistory}
@@ -1101,7 +1132,7 @@ export function App() {
                   <option value="100">100</option>
                   <option value="200">200</option>
                   <option value="500">500</option>
-                  <option value="0">All of them</option>
+                  <option value="0">{t("common.all")}</option>
                 </select>
               </label>
             )}
@@ -1110,26 +1141,65 @@ export function App() {
 
         {page === "about" && (
           <>
+            <p>{t("about.intro")}</p>
+            <p>{t("about.privacy")}</p>
+            <p>{t("about.tray")}</p>
             <p>
-              Aevum turns speech into text anywhere on Windows. Hold the shortcut, talk, release,
-              and the words appear wherever your cursor is — no window switching, no copy-pasting.
-            </p>
-            <p>
-              Transcription runs entirely on this PC with OpenAI Whisper models. Recordings stay in
-              memory only while they are being transcribed, transcripts are stored only in Aevum,
-              and nothing is ever uploaded anywhere.
-            </p>
-            <p>
-              Aevum lives in your system tray, so closing the window keeps it listening for the
-              shortcut. Use the tray icon to reopen it or quit completely.
-            </p>
-            <p>
-              Version {packageInfo.version}. An independent Windows adaptation of{" "}
+              {t("about.versionBefore", { version: packageInfo.version })}{" "}
               <a href="https://github.com/kitlangton/Hex" target="_blank" rel="noreferrer">
                 Hex by Kit Langton
               </a>
-              , built with Tauri and Transformers.js. MIT licensed.
+              {t("about.versionAfter")}
             </p>
+            <h2>{t("updates.title")}</h2>
+            <p className="muted">{t("updates.info")}</p>
+            {updatePhase === "current" && (
+              <p className="status status-ready">
+                <span className="dot" />
+                {t("updates.latest")}
+              </p>
+            )}
+            {updatePhase === "available" && (
+              <>
+                <p>
+                  <strong>{t("updates.available", { version: updateVersion })}</strong>
+                </p>
+                {updateNotes && <p className="update-notes">{updateNotes}</p>}
+              </>
+            )}
+            {updatePhase === "downloading" && (
+              <>
+                <p className="muted">
+                  {t("updates.downloading", {
+                    version: updateVersion,
+                    progress: updateProgress > 0 ? ` — ${Math.round(updateProgress)}%` : "…",
+                  })}
+                </p>
+                <progress className="update-progress" max="100" value={updateProgress} />
+              </>
+            )}
+            {updatePhase === "restarting" && <p className="muted">{t("updates.restarting")}</p>}
+            {updatePhase === "error" && (
+              <p className="error">{t("updates.failed", { message: updateError })}</p>
+            )}
+            {updatePhase === "available" ? (
+              <button type="button" className="button primary" onClick={() => void installUpdate()}>
+                {t("updates.install", { version: updateVersion })}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="button"
+                disabled={
+                  updatePhase === "checking" ||
+                  updatePhase === "downloading" ||
+                  updatePhase === "restarting"
+                }
+                onClick={() => void checkForUpdates()}
+              >
+                {updatePhase === "checking" ? t("updates.checking") : t("updates.check")}
+              </button>
+            )}
           </>
         )}
       </div>

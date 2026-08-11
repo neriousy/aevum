@@ -44,14 +44,19 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: node scripts/check-release-tag.mjs
 
-      - name: Build Windows installers and create draft release
+      - name: Build Windows installers and publish release
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "Aevum ${{ github.ref_name }}"
           releaseBody: "Windows installers for Aevum. The NSIS setup is recommended for most people; the MSI is available for managed deployment."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
           args: --bundles nsis,msi
