@@ -1,0 +1,32 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="g" x1="512" y1="100" x2="512" y2="880" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffe08a"/>
+      <stop offset="0.5" stop-color="#f5a623"/>
+      <stop offset="1" stop-color="#c06a10"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(0 40)">
+    <path d="M512 60 531 84 512 108 493 84Z" fill="url(#g)"/>
+    <g fill="url(#g)">
+      <path d="M512 122 496 300 Q512 284 528 300Z"/>
+      <path d="M512 226 498 356 Q512 344 526 356Z" transform="rotate(90 512 470)"/>
+      <path d="M512 226 498 356 Q512 344 526 356Z" transform="rotate(-90 512 470)"/>
+      <path d="M512 262 501 360 Q512 350 523 360Z" transform="rotate(45 512 470)"/>
+      <path d="M512 262 501 360 Q512 350 523 360Z" transform="rotate(-45 512 470)"/>
+      <path d="M512 300 502 368 Q512 358 522 368Z" transform="rotate(135 512 470)"/>
+      <path d="M512 300 502 368 Q512 358 522 368Z" transform="rotate(-135 512 470)"/>
+    </g>
+    <path fill-rule="evenodd" fill="url(#g)" d="M512 300 C575 360 610 425 610 480 C610 545 566 590 512 590 C458 590 414 545 414 480 C414 425 449 360 512 300 Z M512 345 C560 395 585 440 585 480 C585 528 552 562 512 562 C472 562 439 528 439 480 C439 440 464 395 512 345 Z"/>
+    <path d="M512 428 C534 452 548 470 548 490 A36 36 0 1 1 476 490 C476 470 490 452 512 428 Z" fill="#ffd76a"/>
+    <path d="M512 822 497 610 Q512 626 527 610Z" fill="url(#g)"/>
+    <g fill="url(#g)">
+      <path d="M368 618 C428 622 480 650 512 700 C476 664 428 646 372 644 C360 636 360 626 368 618 Z"/>
+      <path d="M380 742 C440 736 488 712 512 668 C480 706 436 722 384 720 C372 728 372 736 380 742 Z"/>
+    </g>
+    <g fill="url(#g)" transform="translate(1024 0) scale(-1 1)">
+      <path d="M368 618 C428 622 480 650 512 700 C476 664 428 646 372 644 C360 636 360 626 368 618 Z"/>
+      <path d="M380 742 C440 736 488 712 512 668 C480 706 436 722 384 720 C372 728 372 736 380 742 Z"/>
+    </g>
+  </g>
+</svg>
