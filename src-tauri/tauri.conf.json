@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Aevum",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "identifier": "io.github.neriousy.aevum",
   "build": {
     "beforeDevCommand": "npm run prepare:runtime && npm run dev",
@@ -28,7 +28,7 @@
         "url": "index.html#/indicator",
         "title": "Aevum recording indicator",
         "width": 220,
-        "height": 76,
+        "height": 96,
         "decorations": false,
         "transparent": true,
         "shadow": false,

@@ -1011,7 +1011,7 @@ fn position_indicator(app: &tauri::App) {
     let scale = monitor.scale_factor();
     let size = monitor.size();
     let x = (size.width as i32 - (220.0 * scale) as i32) / 2;
-    let y = size.height as i32 - (132.0 * scale) as i32;
+    let y = size.height as i32 - (142.0 * scale) as i32;
     let _ = indicator.set_position(Position::Physical(PhysicalPosition::new(x, y)));
 }
 

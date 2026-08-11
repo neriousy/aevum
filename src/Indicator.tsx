@@ -33,7 +33,7 @@ export function Indicator() {
     () =>
       Array.from({ length: 7 }, (_, index) => {
         const center = 1 - Math.abs(index - 3) / 4;
-        return 5 + Math.max(0.08, state.level) * center * 26;
+        return 5 + Math.max(0.08, state.level) * center * 17;
       }),
     [state.level],
   );
@@ -50,12 +50,14 @@ export function Indicator() {
 
   return (
     <main className={`indicator-shell indicator-${state.status}`}>
-      <div className="indicator-wave" aria-hidden="true">
-        {bars.map((height, index) => (
-          <span key={index} style={{ height }} />
-        ))}
+      <div className="indicator-pill">
+        <div className="indicator-wave" aria-hidden="true">
+          {bars.map((height, index) => (
+            <span key={index} style={{ height }} />
+          ))}
+        </div>
+        {state.status !== "recording" && <span className="indicator-label">{label}</span>}
       </div>
-      {state.status !== "recording" && <span className="indicator-label">{label}</span>}
     </main>
   );
 }
