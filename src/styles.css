@@ -332,6 +332,24 @@ kbd {
   color: #fff;
 }
 
+.button.live {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  animation: button-pulse 1.4s ease-in-out infinite;
+}
+
+.button.busy {
+  border-color: #c5c5cb;
+  background: #f6f6f7;
+  color: var(--muted);
+}
+
+.button.busy:hover {
+  background: #f6f6f7;
+  color: var(--muted);
+}
+
 .button.primary:hover {
   border-color: var(--accent-dark);
   background: var(--accent-dark);
@@ -546,6 +564,10 @@ input.field::placeholder {
 
 @keyframes status-pulse {
   50% { opacity: 0.35; transform: scale(0.8); }
+}
+
+@keyframes button-pulse {
+  50% { opacity: 0.78; }
 }
 
 @keyframes wave-breathe {

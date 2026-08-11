@@ -778,6 +778,7 @@ static HOLD_KEYS: Mutex<HoldKeyboardState> = Mutex::new(HoldKeyboardState {
 });
 static HOLD_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static HOLD_APP: std::sync::OnceLock<AppHandle> = std::sync::OnceLock::new();
+static HOLD_TX: std::sync::OnceLock<std::sync::mpsc::Sender<bool>> = std::sync::OnceLock::new();
 
 #[derive(Clone, Serialize)]
 struct HoldHotkeyEvent {
@@ -840,18 +841,15 @@ fn parse_hold_shortcut(shortcut: &str) -> Result<Option<HoldCombo>, String> {
     Ok(Some(combo))
 }
 
+// Runs inside the low-level hook callback, so it must stay near-instant:
+// Windows removes hooks whose callbacks exceed the low-level hook timeout.
 fn emit_hold_state(active: bool) {
     use std::sync::atomic::Ordering;
     if HOLD_ACTIVE.swap(active, Ordering::SeqCst) == active {
         return;
     }
-    if let Some(app) = HOLD_APP.get() {
-        let _ = app.emit(
-            "hold-hotkey",
-            HoldHotkeyEvent {
-                state: if active { "Pressed" } else { "Released" },
-            },
-        );
+    if let Some(sender) = HOLD_TX.get() {
+        let _ = sender.send(active);
     }
 }
 
@@ -918,17 +916,38 @@ unsafe extern "system" fn hold_hotkey_hook(
 #[cfg(target_os = "windows")]
 fn start_hold_hotkey_hook(app: &AppHandle) {
     let _ = HOLD_APP.set(app.clone());
+    let (sender, receiver) = std::sync::mpsc::channel::<bool>();
+    let _ = HOLD_TX.set(sender);
+    let emitter = app.clone();
+    thread::spawn(move || {
+        while let Ok(active) = receiver.recv() {
+            let _ = emitter.emit(
+                "hold-hotkey",
+                HoldHotkeyEvent {
+                    state: if active { "Pressed" } else { "Released" },
+                },
+            );
+        }
+    });
     thread::spawn(|| unsafe {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GetMessageW, SetWindowsHookExW, MSG, WH_KEYBOARD_LL,
         };
-        let hook = SetWindowsHookExW(
-            WH_KEYBOARD_LL,
-            Some(hold_hotkey_hook),
-            std::ptr::null_mut(),
-            0,
-        );
+        let module = GetModuleHandleW(std::ptr::null());
+        let mut hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hold_hotkey_hook), module, 0);
         if hook.is_null() {
+            hook = SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(hold_hotkey_hook),
+                std::ptr::null_mut(),
+                0,
+            );
+        }
+        if hook.is_null() {
+            if let Some(app) = HOLD_APP.get() {
+                let _ = app.emit("hold-hotkey-hook-failed", ());
+            }
             return;
         }
         let mut message: MSG = std::mem::zeroed();

@@ -20,7 +20,7 @@ import { disable, enable } from "@tauri-apps/plugin-autostart";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { AudioCapture, playCue } from "./audio";
-import { formatDuration, formatTranscript, formatTranscriptMeta, relativeTime } from "./format";
+import { formatTranscript, formatTranscriptMeta, relativeTime } from "./format";
 import { createTranslator, UI_LANGUAGES, type MessageKey } from "./i18n";
 import {
   getPreparedModels,
@@ -248,7 +248,9 @@ export function App() {
   const [modelProgress, setModelProgress] = useState(0);
   const [modelReady, setModelReady] = useState(false);
   const [modelDetail, setModelDetail] = useState("");
-  const [processingElapsed, setProcessingElapsed] = useState(0);
+  const [warming, setWarming] = useState(() =>
+    getPreparedModels().includes(loadSettings().model),
+  );
   const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
   const [search, setSearch] = useState("");
   const [historyPage, setHistoryPage] = useState(0);
@@ -303,19 +305,6 @@ export function App() {
     [],
   );
 
-  useEffect(() => {
-    if (status !== "loading" && status !== "transcribing") {
-      setProcessingElapsed(0);
-      return;
-    }
-    const update = () => {
-      setProcessingElapsed(Math.max(0, (performance.now() - processingStartedAt.current) / 1000));
-    };
-    update();
-    const timer = window.setInterval(update, 200);
-    return () => window.clearInterval(timer);
-  }, [status]);
-
   const notify = useCallback((message: string) => {
     setToast(message);
     window.clearTimeout(toastTimer.current);
@@ -352,22 +341,27 @@ export function App() {
     return () => navigator.mediaDevices?.removeEventListener?.("devicechange", refreshMicrophones);
   }, [refreshMicrophones]);
 
-  const prepareModel = useCallback(async () => {
-    setError("");
-    setModelReady(false);
-    const currentModel = MODELS.find((model) => model.id === settingsRef.current.model)!;
-    setModelDetail(t("model.preparing", { model: currentModel.name }));
-    progressFiles.current.clear();
-    setModelProgress((value) => Math.max(2, value));
-    try {
-      await engine.current!.prepare(settingsRef.current.model);
-    } catch (prepareError) {
-      const message = prepareError instanceof Error ? prepareError.message : String(prepareError);
-      setModelProgress(0);
-      setModelDetail("");
-      setError(t("model.downloadFailed", { message }));
-    }
-  }, [t]);
+  const prepareModel = useCallback(
+    async (auto = false) => {
+      setError("");
+      setModelReady(false);
+      progressFiles.current.clear();
+      if (!auto) {
+        const currentModel = MODELS.find((model) => model.id === settingsRef.current.model)!;
+        setModelDetail(t("model.preparing", { model: currentModel.name }));
+        setModelProgress((value) => Math.max(2, value));
+      }
+      try {
+        await engine.current!.prepare(settingsRef.current.model);
+      } catch (prepareError) {
+        const message = prepareError instanceof Error ? prepareError.message : String(prepareError);
+        setModelProgress(0);
+        setModelDetail("");
+        setError(t("model.downloadFailed", { message }));
+      }
+    },
+    [t],
+  );
 
   useEffect(() => {
     const currentEngine = engine.current!;
@@ -424,7 +418,12 @@ export function App() {
       setModelProgress(0);
       setModelDetail("");
     }
-    if (!ready && getPreparedModels().includes(settings.model)) void prepareModel();
+    if (!ready && getPreparedModels().includes(settings.model)) {
+      setWarming(true);
+      void prepareModel(true).finally(() => setWarming(false));
+    } else {
+      setWarming(false);
+    }
   }, [prepareModel, settings.model]);
 
   const stopEscapeShortcut = useCallback(() => {
@@ -474,7 +473,6 @@ export function App() {
           ? "transcribing"
           : "loading";
         processingStartedAt.current = performance.now();
-        setProcessingElapsed(0);
         statusRef.current = nextStatus;
         setStatus(nextStatus);
         updateIndicator(nextStatus);
@@ -644,10 +642,14 @@ export function App() {
       if (event.payload.state === "Pressed") hotkeyPressRef.current();
       else hotkeyReleaseRef.current();
     });
+    const unlistenFailed = listen("hold-hotkey-hook-failed", () => {
+      setError(t("shortcut.hookFailed"));
+    });
     return () => {
       void unlisten.then((dispose) => dispose()).catch(() => undefined);
+      void unlistenFailed.then((dispose) => dispose()).catch(() => undefined);
     };
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -851,26 +853,6 @@ export function App() {
   const totalMinutes = history.reduce((total, item) => total + item.duration, 0) / 60;
   const recording = status === "recording" || status === "locked";
   const preparing = !modelReady && modelProgress > 0;
-  const elapsedLabel = formatDuration(processingElapsed, settings.uiLanguage);
-
-  const statusText = recording
-    ? status === "locked"
-      ? t("status.handsFree", { hotkey: settings.hotkey.replaceAll("Super", "Win") })
-      : t("status.listening")
-    : status === "transcribing"
-      ? t("status.transcribing", { elapsed: elapsedLabel })
-      : status === "loading"
-        ? t("status.loading", { elapsed: elapsedLabel })
-        : status === "inserting"
-          ? t("status.inserting")
-          : "";
-
-  const statusClass = recording
-    ? "status-live"
-    : status === "transcribing" || status === "loading" || status === "inserting"
-      ? "status-busy"
-      : "status-ready";
-
   const progressLine = `${
     modelDetail || t("model.preparing", { model: currentModel.name })
   } — ${Math.round(modelProgress)}%`;
@@ -966,12 +948,6 @@ export function App() {
 
         {page === "home" && (
           <>
-            {statusText && (
-              <p className={`status ${statusClass}`}>
-                <span className="dot" />
-                {statusText}
-              </p>
-            )}
             <p>
               {t("home.instructionsBefore")} <Shortcut value={settings.hotkey} />{" "}
               {t("home.instructionsAfter")} <kbd>Esc</kbd> {t("home.instructionsEnd")}
@@ -979,7 +955,7 @@ export function App() {
             {!modelReady &&
               (preparing ? (
                 <p className="muted">{progressLine}</p>
-              ) : (
+              ) : warming ? null : (
                 <>
                   <p>
                     {t("home.firstDownload", {
@@ -994,7 +970,7 @@ export function App() {
               ))}
             <button
               type="button"
-              className="button"
+              className={`button ${recording ? "live" : status !== "idle" ? "busy" : ""}`}
               onPointerDown={onRecordPointerDown}
               onPointerUp={onRecordPointerUp}
               onPointerCancel={onRecordPointerUp}
@@ -1191,7 +1167,7 @@ export function App() {
             {!modelReady &&
               (preparing ? (
                 <p className="muted">{progressLine}</p>
-              ) : (
+              ) : warming ? null : (
                 <button type="button" className="button primary" onClick={() => void prepareModel()}>
                   {t("home.downloadModel", { model: currentModel.name })}
                 </button>
