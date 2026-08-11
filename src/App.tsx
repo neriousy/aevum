@@ -480,7 +480,12 @@ export function App() {
         try {
           const result = await engine.current!.transcribe(samples, settingsRef.current.model);
           const text = formatTranscript(result.text, settingsRef.current);
-          if (!text) throw new Error(t("recording.noSpeech"));
+          if (!text) {
+            statusRef.current = "idle";
+            setStatus("idle");
+            updateIndicator("hidden");
+            return;
+          }
 
           const processingDuration = Math.max(
             0,
@@ -540,7 +545,7 @@ export function App() {
         finishingRef.current = false;
       }
     },
-    [notify, stopEscapeShortcut, t, updateIndicator],
+    [notify, stopEscapeShortcut, updateIndicator],
   );
 
   const startRecording = useCallback(
