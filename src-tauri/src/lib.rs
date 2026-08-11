@@ -94,9 +94,33 @@ impl LoadedModel {
 }
 
 #[derive(Default)]
+struct ModelRequestTracker {
+    generation: u64,
+    requested_id: Option<&'static str>,
+}
+
+impl ModelRequestTracker {
+    fn begin(&mut self, model_id: &'static str) -> u64 {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.requested_id = Some(model_id);
+        self.generation
+    }
+
+    fn is_current_request(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
+    fn wants(&self, model_id: &str) -> bool {
+        self.requested_id == Some(model_id)
+    }
+}
+
+#[derive(Default)]
 struct AppState {
     last_transcript: Mutex<String>,
     transcription_model: Arc<Mutex<Option<LoadedModel>>>,
+    model_requests: Arc<Mutex<ModelRequestTracker>>,
+    model_load_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -110,10 +134,20 @@ struct IndicatorState {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelProgress {
+    model: String,
+    request_id: u64,
     status: String,
     file: String,
     loaded: u64,
     total: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelPreparationResult {
+    model: String,
+    request_id: u64,
+    activated: bool,
 }
 
 #[derive(Serialize)]
@@ -129,7 +163,8 @@ fn model_files_are_ready(path: &Path, files: &[&str]) -> bool {
 
 fn emit_model_progress(
     app: &AppHandle,
-    archive: &str,
+    spec: ModelSpec,
+    request_id: u64,
     status: &str,
     loaded: u64,
     total: u64,
@@ -137,8 +172,10 @@ fn emit_model_progress(
     app.emit(
         "transcription-model-progress",
         ModelProgress {
+            model: spec.id.to_string(),
+            request_id,
             status: status.to_string(),
-            file: archive.to_string(),
+            file: spec.archive.to_string(),
             loaded,
             total,
         },
@@ -146,11 +183,22 @@ fn emit_model_progress(
     .map_err(|error| error.to_string())
 }
 
-fn install_model(app: &AppHandle, models_dir: &Path, spec: ModelSpec) -> Result<PathBuf, String> {
+enum ModelInstallOutcome {
+    Ready(PathBuf),
+    Superseded,
+}
+
+fn install_model(
+    app: &AppHandle,
+    models_dir: &Path,
+    spec: ModelSpec,
+    request_id: u64,
+    requests: &Arc<Mutex<ModelRequestTracker>>,
+) -> Result<ModelInstallOutcome, String> {
     fs::create_dir_all(models_dir).map_err(|error| error.to_string())?;
     let final_dir = models_dir.join(spec.directory);
     if model_files_are_ready(&final_dir, spec.files) {
-        return Ok(final_dir);
+        return Ok(ModelInstallOutcome::Ready(final_dir));
     }
 
     let partial_path = models_dir.join(format!("{}.partial", spec.archive));
@@ -170,7 +218,7 @@ fn install_model(app: &AppHandle, models_dir: &Path, spec: ModelSpec) -> Result<
     let mut buffer = [0_u8; 128 * 1024];
     let mut loaded = 0_u64;
     let mut last_progress = Instant::now();
-    emit_model_progress(app, spec.archive, "progress", 0, total)?;
+    emit_model_progress(app, spec, request_id, "progress", 0, total)?;
 
     loop {
         let count = response
@@ -185,12 +233,30 @@ fn install_model(app: &AppHandle, models_dir: &Path, spec: ModelSpec) -> Result<
         hasher.update(&buffer[..count]);
         loaded += count as u64;
         if last_progress.elapsed() >= Duration::from_millis(150) {
-            emit_model_progress(app, spec.archive, "progress", loaded, total)?;
+            let request_is_current = requests
+                .lock()
+                .map_err(|_| "The model request state is unavailable.".to_string())?
+                .is_current_request(request_id);
+            if !request_is_current {
+                drop(output);
+                let _ = fs::remove_file(&partial_path);
+                return Ok(ModelInstallOutcome::Superseded);
+            }
+            emit_model_progress(app, spec, request_id, "progress", loaded, total)?;
             last_progress = Instant::now();
         }
     }
+    let request_is_current = requests
+        .lock()
+        .map_err(|_| "The model request state is unavailable.".to_string())?
+        .is_current_request(request_id);
+    if !request_is_current {
+        drop(output);
+        let _ = fs::remove_file(&partial_path);
+        return Ok(ModelInstallOutcome::Superseded);
+    }
     output.flush().map_err(|error| error.to_string())?;
-    emit_model_progress(app, spec.archive, "verifying", loaded, total)?;
+    emit_model_progress(app, spec, request_id, "verifying", loaded, total)?;
 
     let actual_hash = format!("{:x}", hasher.finalize());
     if actual_hash != spec.sha256 {
@@ -201,7 +267,7 @@ fn install_model(app: &AppHandle, models_dir: &Path, spec: ModelSpec) -> Result<
         ));
     }
 
-    emit_model_progress(app, spec.archive, "extracting", loaded, total)?;
+    emit_model_progress(app, spec, request_id, "extracting", loaded, total)?;
     let extracting_dir = models_dir.join(format!("{}.extracting", spec.directory));
     if extracting_dir.exists() {
         fs::remove_dir_all(&extracting_dir).map_err(|error| error.to_string())?;
@@ -249,12 +315,13 @@ fn install_model(app: &AppHandle, models_dir: &Path, spec: ModelSpec) -> Result<
     let _ = fs::remove_file(&partial_path);
     emit_model_progress(
         app,
-        spec.archive,
+        spec,
+        request_id,
         "done",
         total.max(loaded),
         total.max(loaded),
     )?;
-    Ok(final_dir)
+    Ok(ModelInstallOutcome::Ready(final_dir))
 }
 
 #[tauri::command]
@@ -262,26 +329,89 @@ async fn prepare_transcription_model(
     app: AppHandle,
     state: State<'_, AppState>,
     model: String,
-) -> Result<(), String> {
+) -> Result<ModelPreparationResult, String> {
     let spec = model_spec(&model)?;
     let model_slot = state.transcription_model.clone();
+    let requests = state.model_requests.clone();
+    let load_gate = state.model_load_gate.clone();
     let model_app = app.clone();
     let models_dir = app
         .path()
         .app_data_dir()
         .map_err(|error| error.to_string())?
         .join("models");
+    let request_id = requests
+        .lock()
+        .map_err(|_| "The model request state is unavailable.".to_string())?
+        .begin(spec.id);
 
     tauri::async_runtime::spawn_blocking(move || {
-        let mut model = model_slot
+        // A switch back to the model that is still serving requests should not
+        // wait behind an obsolete model load. Beginning this request above also
+        // prevents that older load from replacing the active model afterward.
+        let already_active = model_slot
             .lock()
-            .map_err(|_| "The transcription model state is unavailable.".to_string())?;
-        if model.as_ref().is_some_and(|loaded| loaded.id() == spec.id) {
-            return Ok(());
+            .map_err(|_| "The transcription model state is unavailable.".to_string())?
+            .as_ref()
+            .is_some_and(|loaded| loaded.id() == spec.id);
+        if already_active {
+            return Ok(ModelPreparationResult {
+                model: spec.id.to_string(),
+                request_id,
+                activated: true,
+            });
         }
-        *model = None;
-        let model_dir = install_model(&model_app, &models_dir, spec)?;
-        emit_model_progress(&model_app, spec.archive, "loading", 1, 1)?;
+
+        let _load_guard = load_gate
+            .lock()
+            .map_err(|_| "The model loading gate is unavailable.".to_string())?;
+
+        let is_requested = || -> Result<bool, String> {
+            Ok(requests
+                .lock()
+                .map_err(|_| "The model request state is unavailable.".to_string())?
+                .wants(spec.id))
+        };
+        if !is_requested()? {
+            return Ok(ModelPreparationResult {
+                model: spec.id.to_string(),
+                request_id,
+                activated: false,
+            });
+        }
+
+        let already_active = model_slot
+            .lock()
+            .map_err(|_| "The transcription model state is unavailable.".to_string())?
+            .as_ref()
+            .is_some_and(|loaded| loaded.id() == spec.id);
+        if already_active {
+            return Ok(ModelPreparationResult {
+                model: spec.id.to_string(),
+                request_id,
+                activated: true,
+            });
+        }
+
+        let model_dir = match install_model(&model_app, &models_dir, spec, request_id, &requests)? {
+            ModelInstallOutcome::Ready(path) => path,
+            ModelInstallOutcome::Superseded => {
+                return Ok(ModelPreparationResult {
+                    model: spec.id.to_string(),
+                    request_id,
+                    activated: false,
+                });
+            }
+        };
+        if !is_requested()? {
+            return Ok(ModelPreparationResult {
+                model: spec.id.to_string(),
+                request_id,
+                activated: false,
+            });
+        }
+
+        emit_model_progress(&model_app, spec, request_id, "loading", 1, 1)?;
         let loaded = match spec.id {
             PARAKEET_MODEL_ID => LoadedModel::Parakeet(
                 ParakeetModel::load(&model_dir, &Quantization::Int8)
@@ -293,9 +423,33 @@ async fn prepare_transcription_model(
             ),
             _ => return Err("That transcription model is not supported.".to_string()),
         };
+
+        // Keep the request lock through the short final swap so a newer request
+        // cannot arrive between the stale check and activation. Work from an
+        // older request is still reusable when the latest intent chose the same model.
+        let request_guard = requests
+            .lock()
+            .map_err(|_| "The model request state is unavailable.".to_string())?;
+        if !request_guard.wants(spec.id) {
+            return Ok(ModelPreparationResult {
+                model: spec.id.to_string(),
+                request_id,
+                activated: false,
+            });
+        }
+        let mut model = model_slot
+            .lock()
+            .map_err(|_| "The transcription model state is unavailable.".to_string())?;
         *model = Some(loaded);
-        emit_model_progress(&model_app, spec.archive, "ready", 1, 1)?;
-        Ok(())
+        drop(model);
+        drop(request_guard);
+
+        emit_model_progress(&model_app, spec, request_id, "ready", 1, 1)?;
+        Ok(ModelPreparationResult {
+            model: spec.id.to_string(),
+            request_id,
+            activated: true,
+        })
     })
     .await
     .map_err(|error| format!("The model preparation task stopped: {error}"))?
@@ -310,10 +464,18 @@ async fn transcribe_speech(
         InvokeBody::Raw(bytes) => bytes,
         InvokeBody::Json(_) => return Err("Audio must be sent as raw 16 kHz samples.".to_string()),
     };
-    if bytes.is_empty() || bytes.len() % size_of::<f32>() != 0 {
+    if bytes.len() < size_of::<u32>() + size_of::<f32>()
+        || !(bytes.len() - size_of::<u32>()).is_multiple_of(size_of::<f32>())
+    {
         return Err("The recorded audio was empty or invalid.".to_string());
     }
-    let audio = bytes
+    let model_code = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let requested_model_id = match model_code {
+        0 => PARAKEET_MODEL_ID,
+        1 => SENSEVOICE_MODEL_ID,
+        _ => return Err("The requested transcription model was invalid.".to_string()),
+    };
+    let audio = bytes[size_of::<u32>()..]
         .chunks_exact(size_of::<f32>())
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect::<Vec<_>>();
@@ -326,6 +488,11 @@ async fn transcribe_speech(
         let model = model
             .as_mut()
             .ok_or_else(|| "The transcription model is not ready yet.".to_string())?;
+        if model.id() != requested_model_id {
+            return Err(
+                "The selected transcription model changed before processing began.".to_string(),
+            );
+        }
         let started = Instant::now();
         let result = match model {
             LoadedModel::Parakeet(model) => model
@@ -639,4 +806,31 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Aevum");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ModelRequestTracker, PARAKEET_MODEL_ID, SENSEVOICE_MODEL_ID};
+
+    #[test]
+    fn newer_model_request_supersedes_older_generation() {
+        let mut tracker = ModelRequestTracker::default();
+        let first = tracker.begin(PARAKEET_MODEL_ID);
+        let second = tracker.begin(SENSEVOICE_MODEL_ID);
+
+        assert!(!tracker.is_current_request(first));
+        assert!(tracker.is_current_request(second));
+        assert!(tracker.wants(SENSEVOICE_MODEL_ID));
+    }
+
+    #[test]
+    fn older_work_can_satisfy_latest_matching_intent() {
+        let mut tracker = ModelRequestTracker::default();
+        let first_sensevoice = tracker.begin(SENSEVOICE_MODEL_ID);
+        tracker.begin(PARAKEET_MODEL_ID);
+        tracker.begin(SENSEVOICE_MODEL_ID);
+
+        assert!(!tracker.is_current_request(first_sensevoice));
+        assert!(tracker.wants(SENSEVOICE_MODEL_ID));
+    }
 }

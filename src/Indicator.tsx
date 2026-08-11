@@ -31,9 +31,9 @@ export function Indicator() {
 
   const bars = useMemo(
     () =>
-      Array.from({ length: 7 }, (_, index) => {
-        const center = 1 - Math.abs(index - 3) / 4;
-        return 5 + Math.max(0.08, state.level) * center * 22;
+      Array.from({ length: 9 }, (_, index) => {
+        const center = 1 - Math.abs(index - 4) / 5;
+        return 6 + Math.max(0.08, state.level) * center * 38;
       }),
     [state.level],
   );
@@ -50,18 +50,12 @@ export function Indicator() {
 
   return (
     <main className={`indicator-shell indicator-${state.status}`}>
-      <div className="indicator-dot" />
       <div className="indicator-wave" aria-hidden="true">
         {bars.map((height, index) => (
           <span key={index} style={{ height }} />
         ))}
       </div>
       <span className="indicator-label">{label}</span>
-      {(state.status === "transcribing" ||
-        state.status === "loading" ||
-        state.status === "inserting") && (
-        <span className="indicator-spinner" />
-      )}
     </main>
   );
 }

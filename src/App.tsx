@@ -247,6 +247,10 @@ export function App() {
   useEffect(() => {
     const currentEngine = engine.current!;
     currentEngine.onProgress = (progress: ModelProgress) => {
+      const progressModel =
+        MODELS.find((model) => model.id === progress.model) ??
+        MODELS.find((model) => model.id === settingsRef.current.model) ??
+        MODELS[0];
       const file = progress.file;
       if (file) {
         if (progress.status === "progress" && Number(progress.total) > 0) {
@@ -276,7 +280,7 @@ export function App() {
               ? t("model.readying")
           : fileName
             ? t("model.downloadingFile", { file: fileName })
-            : t("model.preparing", { model: currentModel.name }),
+            : t("model.preparing", { model: progressModel.name }),
       );
     };
     currentEngine.onReady = (model) => {
@@ -933,6 +937,7 @@ export function App() {
               <select
                 className="field"
                 value={settings.model}
+                disabled={status !== "idle"}
                 onChange={(event) => updateSetting("model", event.target.value as ModelId)}
               >
                 {MODELS.map((model) => (

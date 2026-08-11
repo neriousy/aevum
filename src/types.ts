@@ -53,6 +53,8 @@ export type RecordingStatus =
   | "inserting";
 
 export interface ModelProgress {
+  model?: ModelId;
+  requestId?: number;
   status?: string;
   file?: string;
   progress?: number;

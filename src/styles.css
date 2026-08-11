@@ -430,71 +430,45 @@ input.field::placeholder {
 
 .indicator-shell {
   display: flex;
-  width: max-content;
-  min-width: 150px;
-  height: 40px;
+  height: 100%;
   align-items: center;
-  gap: 10px;
-  margin: 16px auto;
-  padding: 0 14px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: #fff;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
-  color: var(--text);
+  justify-content: center;
+  flex-direction: column;
+  gap: 5px;
+  background: transparent;
   pointer-events: none;
-}
-
-.indicator-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: status-pulse 1s ease-in-out infinite;
 }
 
 .indicator-wave {
   display: flex;
-  width: 30px;
-  height: 24px;
+  height: 44px;
   align-items: center;
   justify-content: center;
-  gap: 2px;
+  gap: 4px;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.45));
 }
 
 .indicator-wave span {
-  width: 2px;
-  min-height: 3px;
-  border-radius: 2px;
+  width: 5px;
+  min-height: 6px;
+  border-radius: 3px;
   background: var(--accent);
   transition: height 80ms linear;
 }
 
 .indicator-label {
-  font-size: 12px;
-  font-weight: 600;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
   white-space: nowrap;
-}
-
-.indicator-spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--line);
-  border-top-color: var(--text);
-  border-radius: 50%;
-  animation: spin 0.8s linear infinite;
-}
-
-.indicator-transcribing .indicator-dot,
-.indicator-loading .indicator-dot,
-.indicator-inserting .indicator-dot {
-  background: var(--amber);
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.65);
 }
 
 .indicator-transcribing .indicator-wave span,
 .indicator-loading .indicator-wave span,
 .indicator-inserting .indicator-wave span {
-  background: var(--muted);
+  background: #f5a623;
   animation: wave-breathe 0.8s ease-in-out infinite alternate;
 }
 
