@@ -8,6 +8,7 @@ env.useBrowserCache = true;
 
 const SAMPLE_RATE = 16_000;
 const MAX_CHUNK_SECONDS = 30;
+const WARMUP_GENERATION_TOKENS = 24;
 const WARMUP_AUDIO = new Float32Array(SAMPLE_RATE);
 
 let transcriber: any;
@@ -45,7 +46,11 @@ async function warmUp(candidate: any) {
     task: "transcribe",
     language: "english",
     return_timestamps: false,
-    max_new_tokens: 1,
+    // Whisper decodes one token at a time. WebGPU may compile new programs as
+    // the decoder cache grows, so a one-token warm-up still leaves those costs
+    // on the first real dictations. Exercise a representative short phrase now.
+    min_new_tokens: WARMUP_GENERATION_TOKENS,
+    max_new_tokens: WARMUP_GENERATION_TOKENS,
   });
 }
 
@@ -134,7 +139,7 @@ async function prepare(model: string, device: InferenceDevice, announce = true) 
 
 function maxNewTokens(audio: Float32Array) {
   const audioSeconds = audio.length / SAMPLE_RATE;
-  return Math.min(256, Math.max(16, Math.ceil(audioSeconds * 8) + 8));
+  return Math.min(256, Math.max(12, Math.ceil(audioSeconds * 6) + 8));
 }
 
 self.onmessage = async (event: MessageEvent) => {
