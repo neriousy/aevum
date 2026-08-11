@@ -35,5 +35,8 @@ jobs:
       - name: Check frontend and release versions
         run: npm run check
 
+      - name: Prepare ONNX Runtime
+        run: npm run prepare:runtime
+
       - name: Check desktop application
         run: cargo check --locked --manifest-path src-tauri/Cargo.toml
