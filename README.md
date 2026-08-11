@@ -9,7 +9,8 @@ Transcription runs locally with Whisper models through Transformers.js. Audio st
 - Global hold-to-talk and hands-free shortcuts
 - Automatic insertion into the active Windows app
 - Whisper Tiny, Base, and Small model choices
-- Automatic language detection plus common language presets
+- Automatic GPU acceleration with explicit GPU and CPU choices
+- Windows-language default plus common spoken-language presets
 - Local transcript history and configurable cleanup
 - System tray and optional launch-at-login behavior
 
@@ -55,7 +56,7 @@ The packages are written to `src-tauri/target/release/bundle/nsis` and `src-taur
 
 Keep the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` in sync. `npm run check:version` verifies this automatically.
 
-Push a matching tag such as `v0.1.0` to build the NSIS and MSI packages in GitHub Actions. The workflow creates a draft GitHub release so its notes and installers can be reviewed before publication.
+Push a matching tag such as `v0.1.1` to build the NSIS and MSI packages in GitHub Actions. The workflow creates a draft GitHub release so its notes and installers can be reviewed before publication.
 
 Release installers are unsigned until an Authenticode certificate is configured. Windows may show an unknown-publisher warning for unsigned builds.
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "./settings";
-import { formatTranscript } from "./format";
+import { formatTranscript, formatTranscriptMeta } from "./format";
 
 describe("formatTranscript", () => {
   it("normalizes whitespace", () => {
@@ -21,5 +21,17 @@ describe("formatTranscript", () => {
         removePunctuation: true,
       }),
     ).toBe("hello world");
+  });
+});
+
+describe("formatTranscriptMeta", () => {
+  it("labels legacy entries as audio duration", () => {
+    expect(formatTranscriptMeta({ duration: 0.6 })).toBe("0.6s audio");
+  });
+
+  it("separates processing time and backend from audio duration", () => {
+    expect(
+      formatTranscriptMeta({ duration: 0.6, processingDuration: 1.24, backend: "webgpu" }),
+    ).toBe("0.6s audio · 1.2s processing · GPU");
   });
 });

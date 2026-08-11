@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 
 interface IndicatorPayload {
-  status: "recording" | "locked" | "transcribing" | "loading";
+  status: "recording" | "locked" | "transcribing" | "loading" | "inserting";
   level: number;
   message?: string;
 }
@@ -45,6 +45,7 @@ export function Indicator() {
       locked: "Hands-free",
       transcribing: "Transcribing",
       loading: "Loading model",
+      inserting: "Inserting text",
     }[state.status] as string);
 
   return (
@@ -56,7 +57,9 @@ export function Indicator() {
         ))}
       </div>
       <span className="indicator-label">{label}</span>
-      {(state.status === "transcribing" || state.status === "loading") && (
+      {(state.status === "transcribing" ||
+        state.status === "loading" ||
+        state.status === "inserting") && (
         <span className="indicator-spinner" />
       )}
     </main>

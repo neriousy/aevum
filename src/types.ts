@@ -5,10 +5,20 @@ export type ModelId =
   | "onnx-community/whisper-base"
   | "onnx-community/whisper-small";
 
+export type InferenceDevice = "auto" | "webgpu" | "wasm";
+export type InferenceBackend = "webgpu" | "wasm";
+
+export interface TranscriptionResult {
+  text: string;
+  inferenceDuration: number;
+  backend: InferenceBackend;
+}
+
 export interface HexSettings {
   hotkey: string;
   pasteLastHotkey: string;
   model: ModelId;
+  inferenceDevice: InferenceDevice;
   language: string;
   microphoneId: string;
   doubleTapLock: boolean;
@@ -29,6 +39,9 @@ export interface Transcript {
   text: string;
   createdAt: string;
   duration: number;
+  processingDuration?: number;
+  inferenceDuration?: number;
+  backend?: InferenceBackend;
 }
 
 export type RecordingStatus =
@@ -36,7 +49,8 @@ export type RecordingStatus =
   | "recording"
   | "locked"
   | "loading"
-  | "transcribing";
+  | "transcribing"
+  | "inserting";
 
 export interface WorkerProgress {
   status?: string;

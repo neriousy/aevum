@@ -1,4 +1,4 @@
-import type { HexSettings, ModelId, Transcript } from "./types";
+import type { HexSettings, InferenceDevice, ModelId, Transcript } from "./types";
 
 export const MODELS: Array<{
   id: ModelId;
@@ -43,8 +43,30 @@ export const PASTE_HOTKEYS = [
   "Disabled",
 ];
 
+export const INFERENCE_DEVICES: Array<{
+  id: InferenceDevice;
+  name: string;
+  description: string;
+}> = [
+  {
+    id: "auto",
+    name: "Automatic (recommended)",
+    description: "Uses the GPU when available and falls back to the CPU if acceleration cannot start.",
+  },
+  {
+    id: "webgpu",
+    name: "GPU (WebGPU)",
+    description: "Forces graphics-card acceleration. Best for modern NVIDIA, AMD, and Intel GPUs.",
+  },
+  {
+    id: "wasm",
+    name: "CPU (WASM)",
+    description: "Forces CPU processing. More compatible, but much slower with larger Whisper models.",
+  },
+];
+
 export const LANGUAGES = [
-  ["auto", "Detect automatically"],
+  ["auto", "Use Windows language"],
   ["english", "English"],
   ["polish", "Polish"],
   ["german", "German"],
@@ -61,6 +83,7 @@ export const DEFAULT_SETTINGS: HexSettings = {
   hotkey: "Ctrl+Shift+Space",
   pasteLastHotkey: "Ctrl+Alt+V",
   model: "onnx-community/whisper-tiny",
+  inferenceDevice: "auto",
   language: "auto",
   microphoneId: "default",
   doubleTapLock: true,
@@ -87,10 +110,35 @@ export function loadSettings(): HexSettings {
     if (!MODELS.some((model) => model.id === settings.model)) {
       settings.model = DEFAULT_SETTINGS.model;
     }
+    if (!INFERENCE_DEVICES.some((device) => device.id === settings.inferenceDevice)) {
+      settings.inferenceDevice = DEFAULT_SETTINGS.inferenceDevice;
+    }
+    if (!LANGUAGES.some(([language]) => language === settings.language)) {
+      settings.language = DEFAULT_SETTINGS.language;
+    }
     return settings;
   } catch {
     return DEFAULT_SETTINGS;
   }
+}
+
+const SYSTEM_LANGUAGE_MAP: Record<string, string> = {
+  en: "english",
+  pl: "polish",
+  de: "german",
+  es: "spanish",
+  fr: "french",
+  it: "italian",
+  pt: "portuguese",
+  uk: "ukrainian",
+  ja: "japanese",
+  zh: "chinese",
+};
+
+export function resolveTranscriptionLanguage(language: string, locale = navigator.language) {
+  if (language !== "auto") return language;
+  const localeCode = locale.toLocaleLowerCase().split(/[-_]/)[0];
+  return SYSTEM_LANGUAGE_MAP[localeCode] ?? "english";
 }
 
 export function saveSettings(settings: HexSettings) {

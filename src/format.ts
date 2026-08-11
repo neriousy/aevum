@@ -1,4 +1,4 @@
-import type { HexSettings } from "./types";
+import type { HexSettings, Transcript } from "./types";
 
 const FILLER_PATTERN = /(?:^|[\s,])(?:uh+|um+|erm+|hmm+)(?:[,\s]+|(?=$|[.!?]))/gi;
 
@@ -23,6 +23,19 @@ export function formatDuration(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const rest = Math.round(seconds % 60);
   return `${minutes}m ${rest}s`;
+}
+
+export function formatTranscriptMeta(
+  transcript: Pick<Transcript, "duration" | "processingDuration" | "backend">,
+) {
+  const parts = [`${formatDuration(transcript.duration)} audio`];
+  if (typeof transcript.processingDuration === "number") {
+    parts.push(`${formatDuration(transcript.processingDuration)} processing`);
+  }
+  if (transcript.backend) {
+    parts.push(transcript.backend === "webgpu" ? "GPU" : "CPU");
+  }
+  return parts.join(" · ");
 }
 
 export function relativeTime(iso: string): string {

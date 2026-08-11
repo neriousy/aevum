@@ -16,10 +16,11 @@ import {
 } from "@tauri-apps/plugin-global-shortcut";
 import { disable, enable } from "@tauri-apps/plugin-autostart";
 import { AudioCapture, playCue } from "./audio";
-import { formatDuration, formatTranscript, relativeTime } from "./format";
+import { formatDuration, formatTranscript, formatTranscriptMeta, relativeTime } from "./format";
 import {
   getPreparedModel,
   HOTKEYS,
+  INFERENCE_DEVICES,
   LANGUAGES,
   loadHistory,
   loadSettings,
@@ -27,10 +28,18 @@ import {
   PASTE_HOTKEYS,
   saveHistory,
   saveSettings,
+  resolveTranscriptionLanguage,
   setPreparedModel,
 } from "./settings";
 import { TranscriptionEngine } from "./transcription";
-import type { HexSettings, Page, RecordingStatus, Transcript, WorkerProgress } from "./types";
+import type {
+  HexSettings,
+  InferenceBackend,
+  Page,
+  RecordingStatus,
+  Transcript,
+  WorkerProgress,
+} from "./types";
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
 
@@ -105,6 +114,8 @@ export function App() {
   const [modelProgress, setModelProgress] = useState(0);
   const [modelReady, setModelReady] = useState(false);
   const [modelDetail, setModelDetail] = useState("");
+  const [modelBackend, setModelBackend] = useState<InferenceBackend | "">("");
+  const [processingElapsed, setProcessingElapsed] = useState(0);
   const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
   const [search, setSearch] = useState("");
   const [confirmClear, setConfirmClear] = useState(false);
@@ -115,6 +126,7 @@ export function App() {
   const engine = useRef<TranscriptionEngine | null>(null);
   if (!engine.current) engine.current = new TranscriptionEngine();
   const recordingStartedAt = useRef(0);
+  const processingStartedAt = useRef(0);
   const lockOnRelease = useRef(false);
   const lastShortRelease = useRef(0);
   const manualRecording = useRef(false);
@@ -137,6 +149,19 @@ export function App() {
   useEffect(() => saveSettings(settings), [settings]);
   useEffect(() => saveHistory(history), [history]);
   useEffect(() => setConfirmClear(false), [page]);
+
+  useEffect(() => {
+    if (status !== "loading" && status !== "transcribing") {
+      setProcessingElapsed(0);
+      return;
+    }
+    const update = () => {
+      setProcessingElapsed(Math.max(0, (performance.now() - processingStartedAt.current) / 1000));
+    };
+    update();
+    const timer = window.setInterval(update, 200);
+    return () => window.clearInterval(timer);
+  }, [status]);
 
   const notify = useCallback((message: string) => {
     setToast(message);
@@ -169,7 +194,10 @@ export function App() {
     progressFiles.current.clear();
     setModelProgress((value) => Math.max(2, value));
     try {
-      await engine.current!.prepare(settingsRef.current.model);
+      await engine.current!.prepare(
+        settingsRef.current.model,
+        settingsRef.current.inferenceDevice,
+      );
     } catch (prepareError) {
       const message = prepareError instanceof Error ? prepareError.message : String(prepareError);
       setModelProgress(0);
@@ -209,25 +237,29 @@ export function App() {
             : "Preparing the model",
       );
     };
-    currentEngine.onReady = (model) => {
+    currentEngine.onReady = (model, device, backend) => {
       setPreparedModel(model);
-      const isCurrent = model === settingsRef.current.model;
+      const isCurrent =
+        model === settingsRef.current.model && device === settingsRef.current.inferenceDevice;
       setModelReady(isCurrent);
       setModelProgress(isCurrent ? 100 : 0);
       setModelDetail("");
+      if (isCurrent) setModelBackend(backend);
     };
 
     if (getPreparedModel() === settings.model) void prepareModel();
-  }, [prepareModel, settings.model]);
+  }, [prepareModel, settings.inferenceDevice, settings.model]);
 
   useEffect(() => {
-    setModelReady(engine.current!.isReady(settings.model));
-    if (!engine.current!.isReady(settings.model)) {
+    const ready = engine.current!.isReady(settings.model, settings.inferenceDevice);
+    setModelReady(ready);
+    if (!ready) {
       progressFiles.current.clear();
       setModelProgress(0);
       setModelDetail("");
+      setModelBackend("");
     }
-  }, [settings.model]);
+  }, [settings.inferenceDevice, settings.model]);
 
   const stopEscapeShortcut = useCallback(() => {
     if (isTauri()) void unregister("Escape").catch(() => undefined);
@@ -272,27 +304,40 @@ export function App() {
 
         if (settingsRef.current.soundEffects) playCue("stop");
 
-        const nextStatus = engine.current!.isReady(settingsRef.current.model)
+        const nextStatus = engine.current!.isReady(
+          settingsRef.current.model,
+          settingsRef.current.inferenceDevice,
+        )
           ? "transcribing"
           : "loading";
+        processingStartedAt.current = performance.now();
+        setProcessingElapsed(0);
         statusRef.current = nextStatus;
         setStatus(nextStatus);
         updateIndicator(nextStatus);
 
         try {
-          const rawText = await engine.current!.transcribe(
+          const result = await engine.current!.transcribe(
             samples,
             settingsRef.current.model,
-            settingsRef.current.language,
+            resolveTranscriptionLanguage(settingsRef.current.language),
+            settingsRef.current.inferenceDevice,
           );
-          const text = formatTranscript(rawText, settingsRef.current);
+          const text = formatTranscript(result.text, settingsRef.current);
           if (!text) throw new Error("No speech was detected. Try speaking a little closer to the microphone.");
 
+          const processingDuration = Math.max(
+            0,
+            (performance.now() - processingStartedAt.current) / 1000,
+          );
           const transcript: Transcript = {
             id: crypto.randomUUID(),
             text,
             createdAt: new Date().toISOString(),
             duration,
+            processingDuration,
+            inferenceDuration: result.inferenceDuration,
+            backend: result.backend,
           };
           if (settingsRef.current.saveHistory) {
             setHistory((current) => {
@@ -303,6 +348,9 @@ export function App() {
             });
           }
 
+          statusRef.current = "inserting";
+          setStatus("inserting");
+          updateIndicator("inserting");
           await invokeIfDesktop("set_last_transcript", { text });
           if (manualRecording.current) {
             notify(text.length > 120 ? `${text.slice(0, 120)}…` : text);
@@ -320,7 +368,12 @@ export function App() {
           const message =
             transcriptionError instanceof Error ? transcriptionError.message : String(transcriptionError);
           setError(message);
-          if (!engine.current!.isReady(settingsRef.current.model)) {
+          if (
+            !engine.current!.isReady(
+              settingsRef.current.model,
+              settingsRef.current.inferenceDevice,
+            )
+          ) {
             progressFiles.current.clear();
             setModelProgress(0);
             setModelDetail("");
@@ -501,6 +554,9 @@ export function App() {
   };
 
   const currentModel = MODELS.find((model) => model.id === settings.model)!;
+  const windowsLanguage = resolveTranscriptionLanguage("auto");
+  const windowsLanguageLabel =
+    LANGUAGES.find(([value]) => value === windowsLanguage)?.[1] ?? windowsLanguage;
   const filteredHistory = history.filter((item) =>
     item.text.toLocaleLowerCase().includes(search.toLocaleLowerCase()),
   );
@@ -510,22 +566,27 @@ export function App() {
   const totalMinutes = history.reduce((total, item) => total + item.duration, 0) / 60;
   const recording = status === "recording" || status === "locked";
   const preparing = !modelReady && modelProgress > 0;
+  const backendLabel =
+    modelBackend === "webgpu" ? "GPU accelerated" : modelBackend === "wasm" ? "CPU mode" : "";
+  const elapsedLabel = formatDuration(processingElapsed);
 
   const statusText = recording
     ? status === "locked"
       ? `Listening hands-free. Press ${settings.hotkey} to finish.`
       : "Listening. Release the shortcut to insert your words."
     : status === "transcribing"
-      ? "Transcribing…"
+      ? `Transcribing${modelBackend === "webgpu" ? " on GPU" : ""}… ${elapsedLabel}`
       : status === "loading"
-        ? "Loading the model…"
-        : modelReady
-          ? "Ready to transcribe."
-          : "";
+        ? `Loading and warming the model… ${elapsedLabel}`
+        : status === "inserting"
+          ? "Inserting text…"
+          : modelReady
+            ? `Ready to transcribe${backendLabel ? ` · ${backendLabel}` : ""}.`
+            : "";
 
   const statusClass = recording
     ? "status-live"
-    : status === "transcribing" || status === "loading"
+    : status === "transcribing" || status === "loading" || status === "inserting"
       ? "status-busy"
       : "status-ready";
 
@@ -651,8 +712,10 @@ export function App() {
             >
               {recording
                 ? "Listening — release to finish"
-                : status === "transcribing" || status === "loading"
-                  ? "Transcribing…"
+                : status === "transcribing" || status === "loading" || status === "inserting"
+                  ? status === "inserting"
+                    ? "Inserting text…"
+                    : "Transcribing…"
                   : "Hold to try it here"}
             </button>
             {history.length > 0 && (
@@ -673,7 +736,7 @@ export function App() {
                   <div className="entry" key={item.id}>
                     <p className="entry-text">{item.text}</p>
                     <p className="meta">
-                      {relativeTime(item.createdAt)} · {formatDuration(item.duration)} ·{" "}
+                      {relativeTime(item.createdAt)} · {formatTranscriptMeta(item)} ·{" "}
                       <button type="button" className="link" onClick={() => void copyTranscript(item.text)}>
                         Copy
                       </button>
@@ -715,7 +778,7 @@ export function App() {
                     <div className="entry" key={item.id}>
                       <p className="entry-text">{item.text}</p>
                       <p className="meta">
-                        {relativeTime(item.createdAt)} · {formatDuration(item.duration)} ·{" "}
+                        {relativeTime(item.createdAt)} · {formatTranscriptMeta(item)} ·{" "}
                         <button type="button" className="link" onClick={() => void copyTranscript(item.text)}>
                           Copy
                         </button>{" "}
@@ -781,7 +844,35 @@ export function App() {
                 </button>
               ))}
 
+            <h2>Performance</h2>
+            <p className="muted">
+              Choose which hardware runs Whisper. Changing this reloads and warms the selected model once.
+            </p>
+            {INFERENCE_DEVICES.map((device) => (
+              <label className="choice" key={device.id}>
+                <input
+                  type="radio"
+                  name="inference-device"
+                  value={device.id}
+                  checked={settings.inferenceDevice === device.id}
+                  onChange={() => updateSetting("inferenceDevice", device.id)}
+                />
+                <span>
+                  <strong>{device.name}</strong> — {device.description}
+                </span>
+              </label>
+            ))}
+            {modelReady && modelBackend && (
+              <p className="muted">
+                Active backend: {modelBackend === "webgpu" ? "GPU (WebGPU)" : "CPU (WASM)"}.
+              </p>
+            )}
+
             <h2>Language</h2>
+            <p className="muted">
+              Choose the language you are speaking. An explicit choice prevents multilingual Whisper
+              from treating Polish speech as English.
+            </p>
             <select
               className="field"
               aria-label="Spoken language"
@@ -790,7 +881,7 @@ export function App() {
             >
               {LANGUAGES.map(([value, label]) => (
                 <option key={value} value={value}>
-                  {label}
+                  {value === "auto" ? `${label} (${windowsLanguageLabel})` : label}
                 </option>
               ))}
             </select>
